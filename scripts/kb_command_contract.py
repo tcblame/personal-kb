@@ -9,7 +9,7 @@ DAILY_COMMANDS: dict[str, tuple[str, str, list[str]]] = {
     "retrieve": ("kb_rag_context", "main", []),
     "search": ("kb_search", "main", []),
     "remember": ("kb_add", "main", []),
-    "update": ("kb_update", "main", []),
+    "update": ("kb_update", "main", ["update"]),
     "retain": ("kb_retain_file", "main", ["retain"]),
     "reference": ("kb_retain_file", "main", ["reference"]),
     "evidence": ("kb_retain_file", "main", []),
