@@ -305,13 +305,16 @@ def _is_legacy_row(row: dict[str, Any], cutoff: str) -> bool:
 
 def _forbid_kb_scope(user_text: str, *, is_subagent: bool) -> str:
     text = user_text or ""
-    write_only = bool(FORBID_WRITE_KB_RE.search(text))
-    full_forbid = bool(FORBID_KB_RE.search(text))
-    subagent_only = bool(SUBAGENT_FORBID_KB_RE.search(text))
+    parent_scope_text, contract_subagent_only = command_contract.strip_subagent_only_kb_guards(text)
+    write_only = bool(FORBID_WRITE_KB_RE.search(parent_scope_text))
+    full_forbid = bool(FORBID_KB_RE.search(parent_scope_text))
+    subagent_only = contract_subagent_only or bool(SUBAGENT_FORBID_KB_RE.search(text))
     if full_forbid:
         if subagent_only and not is_subagent:
             return "subagent_only"
         return "global"
+    if subagent_only:
+        return "subagent_only"
     if write_only:
         return "write_only"
     return "none"

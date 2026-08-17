@@ -31,6 +31,17 @@ KB_WRAPPER_COMMANDS = {
     if module in KB_SCRIPT_PATTERNS
 }
 PYTHON_EXECUTABLE_RE = re.compile(r"python(?:\d+(?:\.\d+)?)?|py", re.I)
+SUBAGENT_ONLY_KB_GUARD_RE = re.compile(
+    r"Do not run personal-kb scripts\.\s*Use only KB hints provided by the parent;[^\n]{0,240}|"
+    r"(?:子\s*agent|subagent|worker|explorer)[^。.!?\n]{0,120}"
+    r"(?:不要|禁止|do not)[^。.!?\n]{0,80}(?:personal-kb|kb_)",
+    re.I,
+)
+
+
+def strip_subagent_only_kb_guards(text: str) -> tuple[str, bool]:
+    stripped, count = SUBAGENT_ONLY_KB_GUARD_RE.subn(" ", str(text or ""))
+    return stripped, count > 0
 
 
 def parse_cli_tokens(command: str) -> list[str]:

@@ -701,7 +701,10 @@ def _parse_session(path: Path) -> dict[str, Any]:
     source = _source_bucket(meta)
     is_subagent = _is_subagent_meta(meta)
     is_main = bool(meta) and not is_subagent
-    forbid_kb = bool(FORBID_KB_RE.search(user_text))
+    parent_scope_text, has_subagent_guard = command_contract.strip_subagent_only_kb_guards(user_text)
+    parent_forbid = bool(FORBID_KB_RE.search(parent_scope_text))
+    forbid_kb_scope = "global" if parent_forbid else "subagent_only" if has_subagent_guard else "none"
+    forbid_kb = parent_forbid or (is_subagent and has_subagent_guard)
     runtime_audit = bool(RUNTIME_AUDIT_RE.search(user_text))
     explicit_kb = bool(EXPLICIT_KB_RE.search(user_text)) and not runtime_audit
     memory_needed = bool(MEMORY_NEEDED_RE.search(user_text))
@@ -718,6 +721,7 @@ def _parse_session(path: Path) -> dict[str, Any]:
         "subagent_parent_thread_id": _subagent_parent_thread_id(meta),
         "user_excerpt": user_text[:180],
         "forbid_kb": forbid_kb,
+        "forbid_kb_scope": forbid_kb_scope,
         "runtime_audit": runtime_audit,
         "explicit_kb": explicit_kb,
         "memory_needed": memory_needed,

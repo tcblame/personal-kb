@@ -61,3 +61,4 @@ Required regression assertions:
 - Challenge proposals are bounded, proposal-only, non-recursive, and do not change the durable KB until the primary conversation resolves them.
 - The public release check excludes real data, manifests, runtime logs, local config, absolute paths, and credential-shaped content.
 - Session audit, effectiveness materialization, and preflight reports redact credential-shaped values before output or storage.
+- The required ordinary-subagent no-KB guard does not mark the parent session as forbidden from explicit KB maintenance or retrieval.

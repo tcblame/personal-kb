@@ -54,4 +54,9 @@ Metric semantics:
 
 Keep main-session metrics separate from ordinary subagent behavior. Do not expose routine telemetry in normal answers; surface actionable findings only when the user asks for an audit.
 
+Scope the standard ordinary-subagent no-KB guard to the child only. A parent
+message that embeds the required `Do not run personal-kb scripts...` worker
+prompt is not a global parent prohibition; a separate parent-level forbid
+still takes precedence.
+
 Challenge proposals and resolutions are runtime audit events, not adoption proof. A critic that writes the durable KB or closes out its own proposal is a quality failure.
