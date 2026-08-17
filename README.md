@@ -67,4 +67,7 @@ python3 scripts/kb_smoke_test.py . --root-layout
 - `self_reported_use_rate` 是 AI 自报，不是独立人工评测。
 - 历史回放是策略影子，不能证明检索改变了最终答案。
 - 短期 brief 帮助率只有在 closeout 显式写入 `session_brief_hit` / `session_brief_help` 后才有意义；缺字段时只能报告遥测缺失。
-- 当前发布草稿没有替仓库所有者选择开源许可证。正式公开前必须添加 `LICENSE`；没有许可证时，公开可见不等于获得开源使用许可。
+
+## 许可证
+
+本项目采用 [Apache License 2.0](LICENSE)，允许使用、修改、再发布、商用和闭源集成，并包含明确的专利授权条款。使用和分发时请遵守仓库根目录的完整许可证文本。
