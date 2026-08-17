@@ -9,7 +9,11 @@
 .env
 .env.*
 *.env
-# Runtime state and durable KB data are opt-in when publishing this Skill.
-storage/**
-!storage/repos/
-!storage/repos/.gitkeep
+config.json
+personal-kb-data/
+records/
+retained-files/
+manifests/
+runtime/
+cache/
+storage/

@@ -13,7 +13,7 @@
 
 ## 快速开始
 
-1. 将这个仓库根目录作为 Skill 目录使用；仓库根目录中的 `SKILL.md`、`scripts/`、`references/` 和 `backend/` 必须一起保留。发布包不含真实 KB 或本机配置。
+1. 将这个仓库根目录作为 Skill 目录使用；根目录中的 `SKILL.md`、`agents/`、`scripts/`、`references/` 和 `backend/` 必须一起保留。发布包不含真实 KB 或本机配置。
 2. 创建本机配置并指定唯一数据根。`config.json` 只留在本机，不要提交：
 
 ```bash
@@ -30,7 +30,7 @@ python3 scripts/kb_storage_test.py
 python3 scripts/kb_challenge_test.py
 python3 scripts/kb_retain_file_test.py
 python3 scripts/kb_eval_preflight.py --routing-only --strict
-python3 scripts/kb_smoke_test.py .
+python3 scripts/kb_smoke_test.py . --root-layout
 ```
 
 不要提交 `kb.jsonl`、会话日志、简历或任何含本地绝对路径的文件。
@@ -58,7 +58,7 @@ python3 scripts/kb_smoke_test.py .
 
 ## 隐私边界
 
-默认不收集对话，不自动公开知识库，不把本地绝对路径写入发布包。项目证据可完整留在本地 retained-files，`kb.jsonl` 只放摘要和指针；公开导出由 allowlist 和敏感扫描共同把关，不包含真实 KB、retained-files 或 manifest。
+默认不收集对话，不自动公开知识库，不把本地绝对路径写入发布包。项目证据可完整留在本地 retained-files，`kb.jsonl` 只放摘要和指针；公开导出由 allowlist 和敏感扫描共同把关，不包含真实 KB、retained-files、资产 manifest 或发布 ownership 状态。
 
 数据库 schema/DDL/样本可用 `kb.py retain --category database` 留存，SSH/MCP 资源材料可用 `--category resources` 留存。完整归档也允许 `.env`、密码、Token、私钥和连接密钥，但它们是本地明文副本，仅在 POSIX 上尽力设置 owner-only 权限；这不是加密保险库。已经由 vault 或 secret manager 管理的材料可改用 `kb.py reference --reference-kind credential --locator <vault-or-secret-manager-item>` 只保存定位符。
 

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import tempfile
+import json
 import importlib.util
 import sys
+import tempfile
 from pathlib import Path
 
 import kb_release
@@ -13,7 +14,14 @@ def _source(root: Path, *, script_text: str = "print('ok')\n") -> Path:
     (source / "references").mkdir(parents=True)
     (source / "backend").mkdir()
     (source / "scripts").mkdir()
+    (source / "agents").mkdir()
     (source / "SKILL.md").write_text("---\nname: personal-kb\ndescription: test\n---\n", encoding="utf-8")
+    (source / "agents" / "openai.yaml").write_text(
+        'interface:\n  display_name: "Personal KB"\n'
+        '  short_description: "A public test Skill"\n'
+        '  default_prompt: "Use $personal-kb for this task."\n',
+        encoding="utf-8",
+    )
     (source / "references" / "retrieval.md").write_text("# Retrieval\n", encoding="utf-8")
     (source / "backend" / "index.py").write_text("# cache\n", encoding="utf-8")
     (source / "scripts" / "kb.py").write_text(script_text, encoding="utf-8")
@@ -21,6 +29,7 @@ def _source(root: Path, *, script_text: str = "print('ok')\n") -> Path:
     (source / "config.json").write_text('{"storage":{"root":"/private/data"}}\n', encoding="utf-8")
     publishing = root / "workspace" / "docs" / "req" / "001-personal-kb-taxonomy" / "publishing"
     publishing.mkdir(parents=True)
+    (publishing / "GITHUB_GITIGNORE").write_text("config.json\npersonal-kb-data/\n", encoding="utf-8")
     (publishing / "config.example.json").write_text('{"storage":{"root":"${PERSONAL_KB_ROOT}"}}\n', encoding="utf-8")
     (publishing / "GITHUB_README.md").write_text("# Public README\n", encoding="utf-8")
     (publishing / "metrics.example.json").write_text('{"metric":"example"}\n', encoding="utf-8")
@@ -43,14 +52,35 @@ def test_allowlist_export_is_repeatable_and_excludes_local_data() -> None:
 
         assert first["status"] == "ok"
         assert second["status"] == "ok"
-        assert (output / kb_release.RELEASE_MARKER).is_file()
-        assert (output / "skills" / "personal-kb" / "config.example.json").is_file()
+        assert kb_release._release_state_path(output).is_file()
+        assert not (output / kb_release.LEGACY_RELEASE_MARKER).exists()
+        assert kb_release._root_layout_findings(output) == []
+        assert (output / "config.example.json").is_file()
         assert (output / "metrics.example.json").is_file()
         assert (output / "LICENSE").read_text(encoding="utf-8") == "Test-only license fixture\n"
         assert (output / "docs" / "req" / "001-personal-kb-taxonomy" / "evals" / "runtime-preflight-cases.json").is_file()
-        assert (output / "skills" / "personal-kb" / "references" / "evals" / "runtime-preflight-cases.json").is_file()
-        assert not (output / "skills" / "personal-kb" / "config.json").exists()
-        assert not (output / "skills" / "personal-kb" / "scripts" / "kb_demo_test.py").exists()
+        assert (output / "references" / "evals" / "runtime-preflight-cases.json").is_file()
+        assert not (output / "config.json").exists()
+        assert not (output / "scripts" / "kb_demo_test.py").exists()
+        assert not (output / "skills").exists()
+        assert not any("__pycache__" in path.parts for path in output.rglob("*"))
+
+        public_regenerated = root / "release-from-public-root"
+        kb_release.build_release(output, public_regenerated)
+        assert _file_list(output) == _file_list(public_regenerated)
+
+
+def test_default_output_supports_source_and_public_root_layouts() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        source = _source(root)
+        assert kb_release._default_output(source) == root / "personal-kb-release"
+        public_root = root / "public-personal-kb"
+        assert kb_release._default_output(public_root) == root / "public-personal-kb-release"
+
+
+def _file_list(root: Path) -> list[str]:
+    return sorted(str(path.relative_to(root)) for path in root.rglob("*") if path.is_file())
 
 
 def test_unknown_nonempty_output_is_refused() -> None:
@@ -67,6 +97,49 @@ def test_unknown_nonempty_output_is_refused() -> None:
         else:
             raise AssertionError("unknown non-empty output was overwritten")
         assert (output / "user-file.txt").read_text(encoding="utf-8") == "keep me\n"
+
+
+def test_unknown_entry_in_owned_output_is_refused() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        source = _source(root)
+        output = root / "release"
+        kb_release.build_release(source, output)
+        (output / "user-file.txt").write_text("keep me\n", encoding="utf-8")
+        try:
+            kb_release.build_release(source, output)
+        except ValueError as exc:
+            assert "unknown entries" in str(exc)
+        else:
+            raise AssertionError("unknown owned-output entry was overwritten")
+        assert (output / "user-file.txt").read_text(encoding="utf-8") == "keep me\n"
+
+
+def test_legacy_nested_release_is_migrated_to_root_layout() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        source = _source(root)
+        output = root / "release"
+        nested_skill = output / "skills" / "personal-kb"
+        nested_skill.mkdir(parents=True)
+        (nested_skill / "SKILL.md").write_text("legacy\n", encoding="utf-8")
+        (output / kb_release.LEGACY_RELEASE_MARKER).write_text(
+            json.dumps(
+                {
+                    "generated_by": "personal-kb-release",
+                    "schema": "personal-kb.release-manifest/v1",
+                    "files": ["skills/personal-kb/SKILL.md"],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        kb_release.build_release(source, output)
+
+        assert kb_release._root_layout_findings(output) == []
+        assert not (output / "skills").exists()
+        assert not (output / kb_release.LEGACY_RELEASE_MARKER).exists()
+        assert kb_release._release_state_path(output).is_file()
 
 
 def test_release_scan_rejects_credential_shaped_tokens() -> None:
@@ -114,7 +187,7 @@ def test_exported_release_scanner_accepts_public_placeholders() -> None:
         output = root / "release"
         kb_release.build_release(source, output)
 
-        exported_path = output / "skills" / "personal-kb" / "scripts" / "kb_release.py"
+        exported_path = output / "scripts" / "kb_release.py"
         spec = importlib.util.spec_from_file_location("exported_kb_release", exported_path)
         assert spec is not None and spec.loader is not None
         exported = importlib.util.module_from_spec(spec)
@@ -125,11 +198,15 @@ def test_exported_release_scanner_accepts_public_placeholders() -> None:
         finally:
             sys.dont_write_bytecode = previous
         assert exported._scan_release(output) == []
+        assert exported._root_layout_findings(output) == []
 
 
 def main() -> int:
     test_allowlist_export_is_repeatable_and_excludes_local_data()
+    test_default_output_supports_source_and_public_root_layouts()
     test_unknown_nonempty_output_is_refused()
+    test_unknown_entry_in_owned_output_is_refused()
+    test_legacy_nested_release_is_migrated_to_root_layout()
     test_release_scan_rejects_credential_shaped_tokens()
     test_release_scan_rejects_generic_credentials()
     test_exported_release_scanner_accepts_public_placeholders()

@@ -21,6 +21,8 @@ from datetime import datetime, timezone, timedelta
 from difflib import SequenceMatcher
 from collections import defaultdict
 
+sys.dont_write_bytecode = True
+
 from kb_kinds import VALID_KINDS
 from kb_lib import kb_base_dir
 
@@ -458,10 +460,49 @@ def check_storage_schema():
 
     return ok
 
+
+def check_root_layout(skill_dir):
+    """检查公开发布包是否把 Skill 放在仓库根目录。"""
+    print("\n=== 10. 检查公开根目录布局 ===")
+    required_files = (
+        ".gitignore",
+        "README.md",
+        "SKILL.md",
+        "agents/openai.yaml",
+        "config.example.json",
+        "scripts/kb.py",
+    )
+    missing = [relative for relative in required_files if not (skill_dir / relative).is_file()]
+    nested = (skill_dir / "skills").exists()
+    forbidden = []
+    for path in skill_dir.rglob("*"):
+        if path.is_dir():
+            continue
+        relative = path.relative_to(skill_dir)
+        if (
+            path.name in {".personal-kb-release.json", "config.json", "manifest.json"}
+            or path.suffix in {".jsonl", ".pyc"}
+            or "__pycache__" in relative.parts
+        ):
+            forbidden.append(str(relative))
+
+    ok = not missing and not nested and not forbidden
+    if missing:
+        print(red("缺少根目录文件: " + ", ".join(missing)))
+    if nested:
+        print(red("发现禁止的嵌套目录: skills/"))
+    if forbidden:
+        print(red("发现禁止的发布文件: " + ", ".join(sorted(forbidden)[:5])))
+    if ok:
+        print(green("根目录 Skill 布局、ownership 状态隔离和发布数据排除均通过"))
+    return ok
+
 def main():
     # 确定 skill 目录
-    if len(sys.argv) > 1:
-        skill_dir = Path(sys.argv[1])
+    root_layout_requested = "--root-layout" in sys.argv[1:]
+    positional_args = [arg for arg in sys.argv[1:] if arg != "--root-layout"]
+    if positional_args:
+        skill_dir = Path(positional_args[0])
     else:
         # Validate the checked-out Skill itself; storage is resolved by config.json.
         skill_dir = Path(__file__).resolve().parent.parent
@@ -484,6 +525,8 @@ def main():
     results.append(("过期条目", check_stale_entries()))
     results.append(("重复条目", check_duplicate_entries()))
     results.append(("存储字段与 ID", check_storage_schema()))
+    if root_layout_requested:
+        results.append(("公开根目录布局", check_root_layout(skill_dir)))
 
     # 总结
     print("\n" + "="*50)
