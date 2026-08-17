@@ -99,6 +99,21 @@ def test_unknown_nonempty_output_is_refused() -> None:
         assert (output / "user-file.txt").read_text(encoding="utf-8") == "keep me\n"
 
 
+def test_missing_license_is_refused() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        source = _source(root)
+        license_path = root / "workspace" / "docs" / "req" / "001-personal-kb-taxonomy" / "publishing" / "LICENSE"
+        license_path.unlink()
+
+        try:
+            kb_release.build_release(source, root / "release")
+        except ValueError as exc:
+            assert "missing LICENSE" in str(exc)
+        else:
+            raise AssertionError("release without LICENSE was accepted")
+
+
 def test_unknown_entry_in_owned_output_is_refused() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         root = Path(temp_dir)
@@ -205,6 +220,7 @@ def main() -> int:
     test_allowlist_export_is_repeatable_and_excludes_local_data()
     test_default_output_supports_source_and_public_root_layouts()
     test_unknown_nonempty_output_is_refused()
+    test_missing_license_is_refused()
     test_unknown_entry_in_owned_output_is_refused()
     test_legacy_nested_release_is_migrated_to_root_layout()
     test_release_scan_rejects_credential_shaped_tokens()

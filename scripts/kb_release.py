@@ -218,9 +218,10 @@ def _copy_tree_allowlisted(source: Path, staging: Path) -> list[str]:
         publishing_dir / "LICENSE" if publishing_dir is not None else None,
         source / "LICENSE",
     )
-    if license_source is not None:
-        _copy_text(license_source, staging / "LICENSE")
-        copied.append("LICENSE")
+    if license_source is None:
+        raise ValueError("public release source is missing LICENSE")
+    _copy_text(license_source, staging / "LICENSE")
+    copied.append("LICENSE")
 
     docs_target = staging / "docs"
     docs_target.mkdir(parents=True, exist_ok=True)
@@ -255,6 +256,7 @@ def _root_layout_findings(root: Path) -> list[str]:
     findings: list[str] = []
     required_files = (
         ".gitignore",
+        "LICENSE",
         "README.md",
         "SKILL.md",
         "agents/openai.yaml",

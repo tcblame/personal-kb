@@ -466,6 +466,7 @@ def check_root_layout(skill_dir):
     print("\n=== 10. 检查公开根目录布局 ===")
     required_files = (
         ".gitignore",
+        "LICENSE",
         "README.md",
         "SKILL.md",
         "agents/openai.yaml",
