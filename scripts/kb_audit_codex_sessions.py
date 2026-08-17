@@ -14,6 +14,7 @@ from typing import Any
 
 from kb_lib import runtime_file
 from kb_runtime import is_test_event
+from kb_sensitive_scan import redact_value
 import kb_command_contract as command_contract
 
 
@@ -126,7 +127,7 @@ def _human_review_summary(
     confirmed = [row for row in in_window if row["label"] == "confirmed_missed_retrieval"]
     false_positives = [row for row in in_window if row["label"] == "auditor_false_positive"]
     reviewed_candidate_ids = {row["session_id"] for row in reviewed_candidates}
-    return {
+    parsed = {
         "path": str(path),
         "status": status,
         "errors": errors,
@@ -142,6 +143,8 @@ def _human_review_summary(
         ),
         "samples": in_window[:10],
     }
+    redacted, _findings = redact_value(parsed)
+    return redacted
 
 
 def _json_loads(value: str) -> dict[str, Any]:
@@ -705,7 +708,7 @@ def _parse_session(path: Path) -> dict[str, Any]:
     rag_or_search = counters["kb_rag_context"] + counters["kb_search"]
     write_or_update = counters["kb_add"] + counters["kb_update"]
 
-    return {
+    parsed = {
         "file": path.name,
         "path": str(path),
         "session_id": str(meta.get("id") or _filename_session_id(path) or path.stem),
@@ -750,6 +753,8 @@ def _parse_session(path: Path) -> dict[str, Any]:
             (detected_kb_call_count - execution_unknown_kb_call_count) / detected_kb_call_count, 4
         ) if detected_kb_call_count else None,
     }
+    redacted, _findings = redact_value(parsed)
+    return redacted
 
 
 def _read_closeouts(path: Path) -> list[dict[str, Any]]:

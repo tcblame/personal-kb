@@ -47,6 +47,11 @@ def _url_replacement(match: re.Match[str]) -> str:
     return f"{match.group('prefix')}{REDACTED}@"
 
 
+def _opaque_token_replacement(match: re.Match[str]) -> str:
+    value = match.group("value")
+    return match.group(0) if _looks_safe(value) else REDACTED
+
+
 PatternSpec = tuple[str, re.Pattern[str], Callable[[re.Match[str]], str]]
 
 PATTERNS: tuple[PatternSpec, ...] = (
@@ -71,6 +76,16 @@ PATTERNS: tuple[PatternSpec, ...] = (
             r"(?P<password>[^\s/@]{6,})@"
         ),
         _url_replacement,
+    ),
+    (
+        "opaque_token",
+        re.compile(
+            r"\b(?P<value>gh[pousr]_[A-Za-z0-9]{20,}|"
+            r"github_pat_[A-Za-z0-9_]{30,}|"
+            r"sk-[A-Za-z0-9_-]{20,}|"
+            r"(?:AKIA|ASIA)[A-Z0-9]{16})\b"
+        ),
+        _opaque_token_replacement,
     ),
 )
 

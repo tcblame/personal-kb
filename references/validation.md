@@ -60,3 +60,4 @@ Required regression assertions:
 - Full evidence retention keeps bytes outside `kb.jsonl`, deduplicates by hash, and preserves credential-bearing files verbatim under the private local data root.
 - Challenge proposals are bounded, proposal-only, non-recursive, and do not change the durable KB until the primary conversation resolves them.
 - The public release check excludes real data, manifests, runtime logs, local config, absolute paths, and credential-shaped content.
+- Session audit, effectiveness materialization, and preflight reports redact credential-shaped values before output or storage.

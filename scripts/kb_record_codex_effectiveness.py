@@ -19,6 +19,7 @@ if sys.platform == "win32" and hasattr(sys.stdout, "buffer"):
 
 from kb_lib import kb_base_dir, now_iso, runtime_file
 from kb_runtime import attach_runtime_scope
+from kb_sensitive_scan import redact_value
 import kb_command_contract as command_contract
 
 
@@ -1532,7 +1533,8 @@ def _parse_session(path: Path) -> dict[str, Any]:
             (len(detected_kb_calls) - execution_unknown_kb_call_count) / len(detected_kb_calls), 4
         ) if detected_kb_calls else None,
     }
-    return analysis
+    redacted, _findings = redact_value(analysis)
+    return redacted
 
 
 def _iter_session_files(root: Path) -> list[Path]:

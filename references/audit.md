@@ -47,6 +47,10 @@ Metric semantics:
   `docs/req/001-personal-kb-taxonomy/evals/runtime-session-human-labels.json`;
   report confirmed misses, confirmed false positives, and unreviewed candidates
   separately.
+- Redact credential assignments, bearer/userinfo secrets, private keys, and
+  opaque provider tokens before storing or printing session excerpts and
+  retrieval queries. Raw rollout files remain the authority and must not be
+  copied into runtime summaries.
 
 Keep main-session metrics separate from ordinary subagent behavior. Do not expose routine telemetry in normal answers; surface actionable findings only when the user asks for an audit.
 

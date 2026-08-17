@@ -19,6 +19,7 @@ from typing import Any
 import kb_audit_codex_sessions as session_audit
 import kb_command_contract as command_contract
 from kb_lib import personal_kb_root_dir
+from kb_sensitive_scan import redact_text
 
 
 ACTIONS = {"skip", "retrieve", "audit_readonly", "maintain", "reuse_parent_hints"}
@@ -178,6 +179,7 @@ def _normalized_key(value: str) -> str:
 def _redact(value: str) -> str:
     text = SECRET_ASSIGNMENT_RE.sub(lambda match: f"{match.group(1)}=<redacted>", value)
     text = OPENAI_TOKEN_RE.sub("<redacted-token>", text)
+    text, _findings = redact_text(text)
     return PRIVATE_IP_RE.sub("<private-ip>", text)
 
 
