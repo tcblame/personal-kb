@@ -60,3 +60,9 @@ prompt is not a global parent prohibition; a separate parent-level forbid
 still takes precedence.
 
 Challenge proposals and resolutions are runtime audit events, not adoption proof. A critic that writes the durable KB or closes out its own proposal is a quality failure.
+
+Every executable test entrypoint activates `kb_test_guard.py` before switching to
+its temporary `PERSONAL_KB_ROOT`. The guard keeps that original `StorageLayout`
+and compares SHA-256, size, and mtime for every file under production records,
+runtime, manifests, and retained-files after the test. Rebuildable cache is the
+only configured storage class excluded from this invariant.

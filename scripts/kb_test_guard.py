@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import sys
 import tempfile
@@ -10,6 +9,8 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
+
+from kb_lib import StorageLayout, storage_layout
 
 
 GUARD_FAILURE_EXIT = 97
@@ -28,39 +29,56 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _configured_layout() -> tuple[Path, Path, Path]:
-    config_path = Path(__file__).resolve().parent.parent / "config.json"
-    payload = json.loads(config_path.read_text(encoding="utf-8"))
-    storage = payload.get("storage") if isinstance(payload.get("storage"), dict) else {}
-    root = Path(str(storage.get("root") or "")).expanduser().resolve()
-    records = root / str(storage.get("records") or "records")
-    runtime = root / str(storage.get("runtime") or "runtime")
-    return root, records, runtime
+def _is_within(path: Path, directory: Path) -> bool:
+    try:
+        path.relative_to(directory)
+    except ValueError:
+        return False
+    return True
 
 
-def _production_fingerprint() -> dict[str, str]:
-    root, records, runtime = _configured_layout()
-    paths = [
-        runtime / "closeout.jsonl",
-        runtime / "adoption_events.jsonl",
-        runtime / "session_briefs.jsonl",
-    ]
-    if records.is_dir():
-        paths.extend(sorted(records.rglob("kb.jsonl")))
+def _protected_files(layout: StorageLayout) -> list[Path]:
+    """Return production facts and runtime artifacts, excluding rebuildable cache."""
+    cache = layout.cache.resolve(strict=False)
+    paths: set[Path] = set()
+    for directory in (
+        layout.records,
+        layout.runtime,
+        layout.manifests,
+        layout.retained_files,
+    ):
+        if directory.is_file():
+            candidates = (directory,)
+        elif directory.is_dir():
+            candidates = directory.rglob("*")
+        else:
+            continue
+        for path in candidates:
+            if not path.is_file():
+                continue
+            resolved = path.resolve(strict=False)
+            if _is_within(resolved, cache):
+                continue
+            paths.add(resolved)
+    return sorted(paths)
+
+
+def _production_fingerprint(layout: StorageLayout) -> dict[str, str]:
+    paths = _protected_files(layout)
 
     fingerprint: dict[str, str] = {}
     for path in paths:
         try:
-            relative = path.relative_to(root).as_posix()
+            relative = path.relative_to(layout.root).as_posix()
         except ValueError:
             relative = str(path)
-        if not path.exists():
+        try:
+            stat = path.stat()
+            fingerprint[relative] = (
+                f"sha256={_sha256(path)};size={stat.st_size};mtime_ns={stat.st_mtime_ns}"
+            )
+        except FileNotFoundError:
             fingerprint[relative] = "missing"
-            continue
-        stat = path.stat()
-        fingerprint[relative] = (
-            f"sha256={_sha256(path)};size={stat.st_size};mtime_ns={stat.st_mtime_ns}"
-        )
     return fingerprint
 
 
@@ -68,6 +86,7 @@ def _production_fingerprint() -> dict[str, str]:
 class TestGuard:
     test_name: str
     temporary: tempfile.TemporaryDirectory[str]
+    production_layout: StorageLayout
     before: dict[str, str]
     previous_env: dict[str, str | None]
 
@@ -82,7 +101,7 @@ class TestGuard:
             except BaseException as exc:
                 error = exc
         finally:
-            after = _production_fingerprint()
+            after = _production_fingerprint(self.production_layout)
             for key, value in self.previous_env.items():
                 if value is None:
                     os.environ.pop(key, None)
@@ -107,7 +126,8 @@ class TestGuard:
 
 
 def activate(test_file: str) -> TestGuard:
-    before = _production_fingerprint()
+    production_layout = storage_layout()
+    before = _production_fingerprint(production_layout)
     previous = {key: os.environ.get(key) for key in _ENV_KEYS}
     temporary = tempfile.TemporaryDirectory(prefix="personal-kb-test-")
     test_name = Path(test_file).stem
@@ -117,6 +137,7 @@ def activate(test_file: str) -> TestGuard:
     return TestGuard(
         test_name=test_name,
         temporary=temporary,
+        production_layout=production_layout,
         before=before,
         previous_env=previous,
     )

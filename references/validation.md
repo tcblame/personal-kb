@@ -57,6 +57,7 @@ Required regression assertions:
 - Policy-simulator inputs and frozen gold remain separate; `--strict` runs trusted RAG against a temporary current-KB copy and checks production/snapshot hashes.
 - Historical replay is a behavior shadow only. Multi-message turns and possible duplicates without lifecycle state are excluded from call-efficiency comparison; unknown execution status is reported, not guessed as success.
 - Runtime and cache path overrides resolve below one canonical root; no hidden work-directory fallback is accepted.
+- Test entrypoints capture the production layout before changing `PERSONAL_KB_ROOT`; records, every runtime artifact, manifests, and retained-files remain byte/size/mtime stable, while rebuildable cache is explicitly excluded.
 - Full evidence retention keeps bytes outside `kb.jsonl`, deduplicates by hash, and preserves credential-bearing files verbatim under the private local data root.
 - Challenge proposals are bounded, proposal-only, non-recursive, and do not change the durable KB until the primary conversation resolves them.
 - The public release check excludes real data, manifests, runtime logs, local config, absolute paths, and credential-shaped content.

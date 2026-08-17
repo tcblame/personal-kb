@@ -165,12 +165,61 @@ def test_active_credentials_are_retained_verbatim_locally() -> None:
         assert env_summary["storage_protection"] == "filesystem-permissions-only"
 
 
+def _guard_fixture(root: Path) -> dict[str, Path]:
+    paths = {
+        "record": root / "repos" / "study" / "main" / "implementation" / "kb.jsonl",
+        "challenge": root / "repos" / "_meta" / "challenge_events.jsonl",
+        "effectiveness": root / "repos" / "_meta" / "codex_kb_effectiveness_log.jsonl",
+        "manifest": root / "manifests" / "retained-files.jsonl",
+        "retained": root / "retained-files" / "study" / "case" / "evidence.txt",
+        "cache": root / "_meta" / "_index" / "keywords.json",
+    }
+    for name, path in paths.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{name}-before\n", encoding="utf-8")
+    return paths
+
+
+def test_guard_covers_all_production_storage_except_cache() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        production_root = Path(temp_dir) / "production"
+        paths = _guard_fixture(production_root)
+        with patch.dict(os.environ, {"PERSONAL_KB_ROOT": str(production_root)}, clear=False):
+            guard = kb_test_guard.activate(__file__)
+            assert guard.production_layout.root == production_root.resolve()
+            assert Path(os.environ["PERSONAL_KB_ROOT"]).resolve() != production_root.resolve()
+
+            def mutate_protected_files() -> int:
+                for name in ("record", "challenge", "effectiveness", "manifest", "retained"):
+                    with paths[name].open("a", encoding="utf-8") as handle:
+                        handle.write("changed\n")
+                return 0
+
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                code = guard.run(mutate_protected_files)
+            assert code == kb_test_guard.GUARD_FAILURE_EXIT
+            message = stderr.getvalue()
+            for name in ("record", "challenge", "effectiveness", "manifest", "retained"):
+                assert paths[name].relative_to(production_root).as_posix() in message
+
+            cache_guard = kb_test_guard.activate(__file__)
+
+            def mutate_cache_only() -> int:
+                with paths["cache"].open("a", encoding="utf-8") as handle:
+                    handle.write("rebuildable-change\n")
+                return 0
+
+            assert cache_guard.run(mutate_cache_only) == 0
+
+
 def main() -> int:
     test_single_root_layout_and_escape_guard()
     test_explicit_missing_config_is_an_error()
     test_same_content_is_reused_across_cases()
     test_external_reference_never_copies_secret_value()
     test_active_credentials_are_retained_verbatim_locally()
+    test_guard_covers_all_production_storage_except_cache()
     print("kb_storage tests passed")
     return 0
 
