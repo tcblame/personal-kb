@@ -16,6 +16,7 @@ from kb_lib import runtime_file
 from kb_runtime import is_test_event
 from kb_sensitive_scan import redact_value
 import kb_command_contract as command_contract
+import kb_session_output as session_output
 
 
 KB_CALL_PATTERNS = command_contract.KB_SCRIPT_PATTERNS
@@ -58,7 +59,7 @@ CUSTOM_EXEC_CMD_RE = re.compile(
 UUID_RE = re.compile(
     r"(?i)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
 )
-PARSER_VERSION = "codex-shell-v9"
+PARSER_VERSION = "codex-shell-v10"
 HUMAN_LABEL_VALUES = frozenset({"confirmed_missed_retrieval", "auditor_false_positive"})
 
 
@@ -156,15 +157,7 @@ def _json_loads(value: str) -> dict[str, Any]:
 
 
 def _output_text(value: Any) -> str:
-    if isinstance(value, str):
-        return value
-    if isinstance(value, list):
-        return "\n".join(part for item in value if (part := _output_text(item)))
-    if isinstance(value, dict):
-        for key in ("text", "output", "content"):
-            if key in value:
-                return _output_text(value.get(key))
-    return ""
+    return session_output.output_text(value)
 
 
 def _user_response_text(content: Any) -> str:
@@ -193,66 +186,16 @@ def _execution_success(output: str) -> bool | None:
 
 
 def _json_dicts_from_output(output: str) -> list[dict[str, Any]]:
-    decoder = json.JSONDecoder()
-    rows: list[dict[str, Any]] = []
-    cursor = 0
-    text = output or ""
-    while cursor < len(text):
-        starts = [index for token in ("{", "[") if (index := text.find(token, cursor)) >= 0]
-        if not starts:
-            break
-        start = min(starts)
-        try:
-            value, end = decoder.raw_decode(text, start)
-        except json.JSONDecodeError:
-            cursor = start + 1
-            continue
-        if isinstance(value, dict):
-            rows.append(value)
-        elif isinstance(value, list):
-            rows.extend(item for item in value if isinstance(item, dict))
-        cursor = max(end, start + 1)
-    return rows
+    return session_output.json_dicts_from_output(output)
 
 
 def _nested_output_texts(output: str) -> list[str]:
-    texts: list[str] = []
-    queue = [output or ""]
-    seen: set[str] = set()
-    while queue:
-        text = queue.pop(0)
-        if not text or text in seen:
-            continue
-        seen.add(text)
-        texts.append(text)
-        for payload in _json_dicts_from_output(text):
-            for key in ("output", "text", "content"):
-                nested = _output_text(payload.get(key))
-                if nested and nested not in seen:
-                    queue.append(nested)
-    return texts
+    return session_output.nested_output_texts(output)
 
 
 def _retrieval_id_from_output(output: str) -> str:
-    header_lines = [
-        line.strip()
-        for text in _nested_output_texts(output)
-        for line in text.splitlines()
-        if line.strip().startswith("KB_RAG_CONTEXT ")
-    ]
-    matches = [
-        match for line in header_lines for match in RAG_TEXT_RETRIEVAL_ID_RE.findall(line)
-    ]
-    if matches and RETRIEVAL_ID_RE.fullmatch(matches[-1]):
-        return matches[-1]
-    for text in _nested_output_texts(output):
-        for payload in _json_dicts_from_output(text):
-            if payload.get("mode") != "read_only_rag_context":
-                continue
-            retrieval_id = str(payload.get("retrieval_id") or "").strip()
-            if RETRIEVAL_ID_RE.fullmatch(retrieval_id):
-                return retrieval_id
-    return ""
+    results = session_output.retrieval_results(output)
+    return str(results[-1].get("retrieval_id") or "") if results else ""
 
 
 def _decode_js_string(literal: str) -> str:
@@ -290,9 +233,14 @@ def _call_commands(payload: dict[str, Any]) -> tuple[list[str], str]:
     if payload.get("type") == "function_call":
         args = _json_loads(str(payload.get("arguments") or "{}"))
         command = str(args.get("cmd") or "")
-        return ([command] if command else []), "function_call"
+        return command_contract.split_shell_commands(command), "function_call"
     if payload.get("type") == "custom_tool_call" and payload.get("name") == "exec":
-        return _custom_exec_commands(str(payload.get("input") or "")), "custom_tool_call_exec"
+        commands = [
+            segment
+            for command in _custom_exec_commands(str(payload.get("input") or ""))
+            for segment in command_contract.split_shell_commands(command)
+        ]
+        return commands, "custom_tool_call_exec"
     return [], ""
 
 
@@ -594,6 +542,7 @@ def _parse_session(path: Path) -> dict[str, Any]:
     unparsed_exec_count = 0
     failed_kb_call_count = 0
     execution_unknown_kb_call_count = 0
+    terminal_status = "unknown"
 
     for line in path.read_text(errors="replace").splitlines():
         try:
@@ -607,6 +556,8 @@ def _parse_session(path: Path) -> dict[str, Any]:
     current_turn_id = ""
     for obj in rows:
         payload = obj.get("payload") or {}
+        if obj.get("type") == "event_msg" and payload.get("type") in {"task_complete", "turn_aborted"}:
+            terminal_status = str(payload.get("type"))
         if obj.get("type") == "turn_context" and isinstance(payload, dict):
             current_turn_id = _turn_id(payload, current_turn_id)
         if obj.get("type") == "event_msg" and payload.get("type") == "task_started":
@@ -655,6 +606,8 @@ def _parse_session(path: Path) -> dict[str, Any]:
         commands, _ = _call_commands(payload)
         output = output_by_call_id.get(str(payload.get("call_id") or ""), "")
         success = _execution_success(output)
+        retrieval_results = session_output.retrieval_results(output)
+        retrieval_result_index = 0
         for cmd in commands:
             tokens = _parse_cli_tokens(cmd)
             if "personal-kb/SKILL.md" in cmd and success is True:
@@ -673,13 +626,18 @@ def _parse_session(path: Path) -> dict[str, Any]:
             for key in scripts:
                 counters[key] += 1
                 if key in {"kb_rag_context", "kb_search"}:
+                    result: dict[str, Any] = {}
+                    if key == "kb_rag_context":
+                        if retrieval_result_index < len(retrieval_results):
+                            result = retrieval_results[retrieval_result_index]
+                        retrieval_result_index += 1
                     rag_events.append({
                         "turn_id": call_info["turn_id"],
                         "sequence": call_info["sequence"],
                         "query": _rag_query(tokens, KB_CALL_PATTERNS[key]),
                         "script": key,
                         "retrieval_id": (
-                            _retrieval_id_from_output(output)
+                            str(result.get("retrieval_id") or "")
                             or (_flag_values(tokens, "--retrieval-id")[-1] if _flag_values(tokens, "--retrieval-id") else "")
                         ) if key == "kb_rag_context" else "",
                     })
@@ -718,6 +676,8 @@ def _parse_session(path: Path) -> dict[str, Any]:
         "source": source,
         "is_subagent": is_subagent,
         "is_main": is_main,
+        "terminal_status": terminal_status,
+        "terminal_aborted": terminal_status == "turn_aborted",
         "subagent_parent_thread_id": _subagent_parent_thread_id(meta),
         "user_excerpt": user_text[:180],
         "forbid_kb": forbid_kb,
@@ -961,6 +921,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     missed_main = [
         s for s in sessions
         if s["is_main"]
+        and not s.get("terminal_aborted")
         and not s["forbid_kb"]
         and not s["runtime_audit"]
         and (s["explicit_kb"] or s["memory_needed"])
@@ -975,6 +936,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     main_expected_rag = [
         s for s in sessions
         if s["is_main"]
+        and not s.get("terminal_aborted")
         and not s["forbid_kb"]
         and not s["runtime_audit"]
         and (s["explicit_kb"] or s["memory_needed"])
@@ -1067,6 +1029,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "kb_activity_sessions": len(kb_activity),
         "main_sessions": count(lambda s: s["is_main"]),
         "subagent_sessions": count(lambda s: s["is_subagent"]),
+        "terminal_aborted_sessions": count(lambda s: s.get("terminal_aborted")),
         "main_missed_rag_sessions": len(missed_main),
         "main_missed_rag_semantics": "auditor_candidate_not_human_ground_truth",
         "auditor_candidate_missed_rag_sessions": len(missed_main),

@@ -29,6 +29,8 @@ Identity and pairing rules:
 - Keep root and subagent metrics separate even when they share a parent `session_id`.
 - Link a delegated scout retrieval to the parent only through an exact runtime `retrieval_id`, an explicit parent closeout link, and the rollout `parent_thread_id`. Never guess a cross-rollout link from query similarity or timing alone.
 - Pair retrieval and closeout by turn/query/call evidence; an old closeout elsewhere in a long session does not close a later retrieval.
+- Track the final lifecycle event. A session ending in `turn_aborted` is reported separately and is not treated as a retrieval opportunity when no KB call ran.
+- Split top-level `&&`/`||` wrapper chains and map ordered RAG outputs back to each invocation. Recursively unwrap named structured result containers before declaring a linked retrieval ID dangling.
 - Apply the requested date window to sessions and closeout rows.
 - Treat explicit Personal KB runtime audits as direct session/runtime inspection, not as missed long-term RAG.
 
@@ -49,7 +51,9 @@ Metric semantics:
   separately.
 - Redact credential assignments, bearer/userinfo secrets, private keys, and
   opaque provider tokens before storing or printing session excerpts and
-  retrieval queries. Raw rollout files remain the authority and must not be
+  retrieval queries. Opaque-token boundaries are ASCII boundaries so a token
+  immediately followed by Chinese or other Unicode text is still redacted.
+  Raw rollout files remain the authority and must not be
   copied into runtime summaries.
 
 Keep main-session metrics separate from ordinary subagent behavior. Do not expose routine telemetry in normal answers; surface actionable findings only when the user asks for an audit.

@@ -21,6 +21,7 @@ from kb_lib import kb_base_dir, now_iso, runtime_file
 from kb_runtime import attach_runtime_scope
 from kb_sensitive_scan import redact_value
 import kb_command_contract as command_contract
+import kb_session_output as session_output
 
 
 KB_SCRIPT_PATTERNS = command_contract.KB_SCRIPT_PATTERNS
@@ -95,7 +96,7 @@ CONTEXT_PREFIXES = (
     "<subagent_notification>",
     "<turn_aborted>",
 )
-PARSER_VERSION = "codex-shell-v8"
+PARSER_VERSION = "codex-shell-v9"
 
 
 def log_path(base_dir: Path | None = None) -> Path:
@@ -434,15 +435,7 @@ def _parse_exit_code(output: str) -> int | None:
 
 
 def _output_text(value: Any) -> str:
-    if isinstance(value, str):
-        return value
-    if isinstance(value, list):
-        return "\n".join(part for item in value if (part := _output_text(item)))
-    if isinstance(value, dict):
-        for key in ("text", "output", "content"):
-            if key in value:
-                return _output_text(value.get(key))
-    return ""
+    return session_output.output_text(value)
 
 
 def _user_response_text(content: Any) -> str:
@@ -482,27 +475,7 @@ def _execution_success(output: str) -> bool | None:
 
 
 def _json_dicts_from_output(output: str) -> list[dict[str, Any]]:
-    """Extract JSON objects from shell wrappers without assuming JSON-only stdout."""
-    text = output or ""
-    decoder = json.JSONDecoder()
-    rows: list[dict[str, Any]] = []
-    cursor = 0
-    while cursor < len(text):
-        starts = [index for token in ("{", "[") if (index := text.find(token, cursor)) >= 0]
-        if not starts:
-            break
-        start = min(starts)
-        try:
-            value, end = decoder.raw_decode(text, start)
-        except json.JSONDecodeError:
-            cursor = start + 1
-            continue
-        if isinstance(value, dict):
-            rows.append(value)
-        elif isinstance(value, list):
-            rows.extend(item for item in value if isinstance(item, dict))
-        cursor = max(end, start + 1)
-    return rows
+    return session_output.json_dicts_from_output(output)
 
 
 _CLOSEOUT_OUTPUT_DETAIL_KEYS = {
@@ -573,60 +546,13 @@ def _custom_exec_commands(source: str) -> list[str]:
 
 
 def _parse_hit_count_from_output(output: str) -> int | None:
-    header_lines = [
-        line.strip()
-        for line in (output or "").splitlines()
-        if line.strip().startswith("KB_RAG_CONTEXT ")
-    ]
-    matches = [match for line in header_lines for match in RAG_TEXT_HITS_RE.findall(line)]
-    if matches:
-        # The canonical hit count is emitted after the quoted query. Taking
-        # the final header value prevents query text from spoofing an earlier
-        # `hits=` token while remaining compatible with legacy text output.
-        return _coerce_int(matches[-1], 0)
-    for parsed in _json_dicts_from_output(output):
-        if parsed.get("mode") != "read_only_rag_context":
-            continue
-        if "hit_count" in parsed:
-            return _coerce_int(parsed.get("hit_count"), 0)
-        items = parsed.get("items")
-        if isinstance(items, list):
-            return len(items)
-    try:
-        parsed = json.loads(output or "")
-    except json.JSONDecodeError:
-        return None
-    if isinstance(parsed, dict):
-        if "hit_count" in parsed:
-            return _coerce_int(parsed.get("hit_count"), 0)
-        items = parsed.get("items")
-        if isinstance(items, list):
-            return len(items)
-    if isinstance(parsed, list):
-        return len(parsed)
-    return None
+    results = session_output.retrieval_results(output)
+    return results[-1].get("hit_count") if results else None
 
 
 def _parse_retrieval_id_from_output(output: str) -> str:
-    header_lines = [
-        line.strip()
-        for line in (output or "").splitlines()
-        if line.strip().startswith("KB_RAG_CONTEXT ")
-    ]
-    matches = [
-        match for line in header_lines for match in RAG_TEXT_RETRIEVAL_ID_RE.findall(line)
-    ]
-    if matches and RETRIEVAL_ID_RE.fullmatch(matches[-1]):
-        # The runtime-generated ID follows the quoted query in canonical text
-        # output. Use the last valid token so query text cannot forge the ID.
-        return matches[-1]
-    for parsed in _json_dicts_from_output(output):
-        if parsed.get("mode") != "read_only_rag_context":
-            continue
-        retrieval_id = str(parsed.get("retrieval_id") or "").strip()
-        if RETRIEVAL_ID_RE.fullmatch(retrieval_id):
-            return retrieval_id
-    return ""
+    results = session_output.retrieval_results(output)
+    return str(results[-1].get("retrieval_id") or "") if results else ""
 
 
 def _parse_cli_tokens(command: str) -> list[str]:
@@ -910,9 +836,14 @@ def _call_commands(payload: dict[str, Any]) -> tuple[list[str], str]:
     if payload_type == "function_call":
         arguments = _json_loads(str(payload.get("arguments") or "{}"))
         command = str(arguments.get("cmd") or "")
-        return ([command] if command else []), "function_call"
+        return command_contract.split_shell_commands(command), "function_call"
     if payload_type == "custom_tool_call" and payload.get("name") == "exec":
-        return _custom_exec_commands(str(payload.get("input") or "")), "custom_tool_call_exec"
+        commands = [
+            segment
+            for command in _custom_exec_commands(str(payload.get("input") or ""))
+            for segment in command_contract.split_shell_commands(command)
+        ]
+        return commands, "custom_tool_call_exec"
     return [], ""
 
 
@@ -932,6 +863,8 @@ def _parse_command_call(
     exit_code = _parse_exit_code(output)
     success = _execution_success(output)
     parsed: list[dict[str, Any]] = []
+    retrieval_results = session_output.retrieval_results(output)
+    retrieval_result_index = 0
     for command in commands:
         tokens = _parse_cli_tokens(command)
         script_key, invocation_kind = _detect_kb_script(command, tokens)
@@ -951,10 +884,16 @@ def _parse_command_call(
         }
 
         if script_key == "kb_rag_context":
+            result = (
+                retrieval_results[retrieval_result_index]
+                if retrieval_result_index < len(retrieval_results)
+                else {}
+            )
+            retrieval_result_index += 1
             info["query"] = _first_positional_after_script(tokens, _script_name(script_key))
-            info["hit_count"] = _parse_hit_count_from_output(output)
+            info["hit_count"] = result.get("hit_count")
             retrieval_id = (
-                _parse_retrieval_id_from_output(output)
+                str(result.get("retrieval_id") or "")
                 or _parse_optional_flag(tokens, "--retrieval-id")
             )
             info["retrieval_id"] = (
@@ -1112,10 +1051,13 @@ def _parse_session(path: Path) -> dict[str, Any]:
     current_turn_id = ""
     synthetic_turn = 0
     last_user_turn = ""
+    terminal_status = "unknown"
 
     for row in rows:
         row_type = row.get("type")
         payload = row.get("payload") or {}
+        if row_type == "event_msg" and payload.get("type") in {"task_complete", "turn_aborted"}:
+            terminal_status = str(payload.get("type"))
         if row_type == "session_meta" and isinstance(payload, dict):
             metas.append(payload)
         elif row_type == "turn_context" and isinstance(payload, dict):
@@ -1320,16 +1262,18 @@ def _parse_session(path: Path) -> dict[str, Any]:
             # event user_message while the child task itself is unavailable.
             subagent_authorization = "unknown"
             subagent_authorization_source = "child_task_unavailable"
+    terminal_aborted = terminal_status == "turn_aborted"
     subagent_missing_no_kb_guard = (
         bool(subagent["is_subagent"])
+        and not terminal_aborted
         and subagent_authorization == "not_authorized"
         and not guard_observed
         and forbid_kb_scope not in {"global", "subagent_only"}
         and instruction_forbid_scope not in {"global", "subagent_only"}
     )
-    kb_expected = not forbid_kb and (explicit_kb or memory_needed)
+    kb_expected = not terminal_aborted and not forbid_kb and (explicit_kb or memory_needed)
     if subagent["is_subagent"]:
-        kb_expected = subagent_authorization == "authorized"
+        kb_expected = not terminal_aborted and subagent_authorization == "authorized"
     retrieval_used = counters["kb_rag_context"] + counters["kb_search"] > 0
     kb_used = bool(kb_calls)
     kb_write_used = counters["kb_add"] + counters["kb_update"] + counters["kb_closeout"] > 0
@@ -1381,8 +1325,13 @@ def _parse_session(path: Path) -> dict[str, Any]:
         reasons.append(f"{unmatched_retrieval_call_count} retrieval call(s) have no later matching closeout")
     if adoption_unconfirmed:
         reasons.append("adoption was requested but per-entry success is unconfirmed because closeout output was silent")
+    if terminal_aborted:
+        reasons.append("session ended with turn_aborted and is excluded from retrieval-opportunity metrics")
 
-    if subagent["is_subagent"]:
+    if terminal_aborted and not kb_used:
+        verdict = "turn_aborted"
+        score = 0
+    elif subagent["is_subagent"]:
         if forbidden_kb_used:
             verdict = "subagent_forbidden_but_used"
             score = -2
@@ -1449,6 +1398,8 @@ def _parse_session(path: Path) -> dict[str, Any]:
         "source": source,
         "thread_source": thread_source,
         "is_subagent": subagent["is_subagent"],
+        "terminal_status": terminal_status,
+        "terminal_aborted": terminal_aborted,
         "subagent_parent_thread_id": subagent["subagent_parent_thread_id"],
         "subagent_role": subagent["subagent_role"],
         "subagent_nickname": subagent["subagent_nickname"],

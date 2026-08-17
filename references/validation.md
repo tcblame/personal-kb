@@ -54,6 +54,8 @@ Required regression assertions:
 - Safety-critical `ccs` mappings and update/restart commands remain in a mandatory project instruction section, outside optional KB policy, and the project prompt requires verified parent hints before dispatching a history-dependent worker.
 - Broad parent retrieval routes to one read-only KB scout; the scout cannot write, heat, or close out; the parent reuses the returned brief without a duplicate RAG.
 - Every RAG output has an opaque `retrieval_id`; delegated IDs link only to the declared parent closeout and orphan/duplicate IDs remain visible.
+- Chained wrapper retrievals are split into distinct calls and ordered multi-result or named nested exec outputs preserve every real retrieval ID.
+- A rollout whose final lifecycle event is `turn_aborted` is excluded from retrieval-opportunity and missed-retrieval counts when no KB call ran.
 - Policy-simulator inputs and frozen gold remain separate; `--strict` runs trusted RAG against a temporary current-KB copy and checks production/snapshot hashes.
 - Historical replay is a behavior shadow only. Multi-message turns and possible duplicates without lifecycle state are excluded from call-efficiency comparison; unknown execution status is reported, not guessed as success.
 - Runtime and cache path overrides resolve below one canonical root; no hidden work-directory fallback is accepted.
@@ -62,4 +64,5 @@ Required regression assertions:
 - Challenge proposals are bounded, proposal-only, non-recursive, and do not change the durable KB until the primary conversation resolves them.
 - The public release check excludes real data, manifests, runtime logs, local config, absolute paths, and credential-shaped content.
 - Session audit, effectiveness materialization, and preflight reports redact credential-shaped values before output or storage.
+- Opaque provider tokens remain redacted when immediately followed by Chinese or other non-ASCII word characters.
 - The required ordinary-subagent no-KB guard does not mark the parent session as forbidden from explicit KB maintenance or retrieval.

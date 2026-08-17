@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import importlib.util
+import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -251,6 +253,31 @@ def test_exported_release_scanner_accepts_public_placeholders() -> None:
         assert exported._root_layout_findings(output) == []
 
 
+def test_exported_root_smoke_does_not_write_bytecode() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        source = Path(__file__).resolve().parent.parent
+        output = root / "release"
+        kb_release.build_release(source, output)
+        env = dict(os.environ)
+        env["PERSONAL_KB_ROOT"] = str(root / "personal-kb-data")
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(output / "scripts" / "kb_smoke_test.py"),
+                str(output),
+                "--root-layout",
+            ],
+            cwd=output,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+        assert not any("__pycache__" in path.parts for path in output.rglob("*"))
+
+
 def main() -> int:
     test_allowlist_export_is_repeatable_and_excludes_local_data()
     test_default_output_supports_source_and_public_root_layouts()
@@ -262,6 +289,7 @@ def main() -> int:
     test_release_scan_rejects_credential_shaped_tokens()
     test_release_scan_rejects_generic_credentials()
     test_exported_release_scanner_accepts_public_placeholders()
+    test_exported_root_smoke_does_not_write_bytecode()
     print("kb_release tests passed")
     return 0
 

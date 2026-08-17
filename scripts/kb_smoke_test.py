@@ -21,11 +21,11 @@ from datetime import datetime, timezone, timedelta
 from difflib import SequenceMatcher
 from collections import defaultdict
 
+sys.dont_write_bytecode = True
+
 import kb_test_guard
 
 _TEST_GUARD = kb_test_guard.activate(__file__) if __name__ == "__main__" else None
-
-sys.dont_write_bytecode = True
 
 from kb_kinds import VALID_KINDS
 from kb_lib import kb_base_dir

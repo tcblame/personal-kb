@@ -80,10 +80,10 @@ PATTERNS: tuple[PatternSpec, ...] = (
     (
         "opaque_token",
         re.compile(
-            r"\b(?P<value>gh[pousr]_[A-Za-z0-9]{20,}|"
+            r"(?<![A-Za-z0-9_])(?P<value>gh[pousr]_[A-Za-z0-9]{20,}|"
             r"github_pat_[A-Za-z0-9_]{30,}|"
             r"sk-[A-Za-z0-9_-]{20,}|"
-            r"(?:AKIA|ASIA)[A-Z0-9]{16})\b"
+            r"(?:AKIA|ASIA)[A-Z0-9]{16})(?![A-Za-z0-9_])"
         ),
         _opaque_token_replacement,
     ),

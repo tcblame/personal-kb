@@ -51,6 +51,48 @@ def parse_cli_tokens(command: str) -> list[str]:
         return command.split()
 
 
+def split_shell_commands(command: str) -> list[str]:
+    """Split common top-level shell chains while preserving quoted operators."""
+    text = str(command or "")
+    if not text.strip():
+        return []
+    commands: list[str] = []
+    start = 0
+    quote = ""
+    escaped = False
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if escaped:
+            escaped = False
+            index += 1
+            continue
+        if quote:
+            if char == "\\" and quote != "'":
+                escaped = True
+            elif char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char in {"'", '"', "`"}:
+            quote = char
+            index += 1
+            continue
+        operator = text[index : index + 2]
+        if operator in {"&&", "||"}:
+            segment = text[start:index].strip()
+            if segment:
+                commands.append(segment)
+            index += 2
+            start = index
+            continue
+        index += 1
+    tail = text[start:].strip()
+    if tail:
+        commands.append(tail)
+    return commands
+
+
 def token_basename(token: str) -> str:
     return Path(str(token or "").strip().strip("\"'")).name
 
