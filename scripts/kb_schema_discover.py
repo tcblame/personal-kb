@@ -24,11 +24,9 @@ from pathlib import Path
 from typing import Any
 
 # Windows UTF-8 输出修复
-if sys.platform == 'win32':
-    if hasattr(sys.stdout, 'reconfigure'):
-        sys.stdout.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)
-    if hasattr(sys.stderr, 'reconfigure'):
-        sys.stderr.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)
+if sys.platform == 'win32' and hasattr(sys.stdout, 'buffer'):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace', line_buffering=True)
 
 from kb_kinds import VALID_KINDS
 from kb_lib import kb_base_dir, read_jsonl
@@ -52,7 +50,7 @@ KIND_RECOMMENDED_FIELDS = {
         "description": "问题/故障类记录：bug修复、环境差异、配置问题、依赖问题",
         "trigger_terms_hint": "异常类名、错误码、日志关键字、配置键",
         "examples": {
-            "aliases": ["项目甲换 token 超时", "登录接口 500"],
+            "aliases": ["GMOS换token超时", "登录接口500"],
             "trigger_terms": ["NullPointerException", "curl: (28) Connection timed out", "sql_require_primary_key"],
         }
     },
@@ -82,8 +80,8 @@ KIND_RECOMMENDED_FIELDS = {
         "description": "需求/业务事实类记录：需求摘要、业务规则、验收标准",
         "trigger_terms_hint": "需求编号、页面名、接口名、业务术语",
         "examples": {
-            "aliases": ["项目甲工单迁移", "运营数据看板"],
-            "trigger_terms": ["REQ-2024-001", "/work-orders/migrate", "工单系统"],
+            "aliases": ["example supervision迁移", "LED大屏数据看板"],
+            "trigger_terms": ["REQ-2024-001", "/supervision/migrate", "督办系统"],
         }
     },
     "implementation": {

@@ -1,9 +1,50 @@
 [
   {
+    "name": "resume-current",
+    "markers": ["最终简历", "当前简历", "最新版简历", "投递版", "修改简历", "修改我的简历", "简历怎么制作", "好的简历"],
+    "anchors": ["00-当前版本.md", "canonical_content", "工作经历", "项目经历", "简历结构"],
+    "weight": 0.95
+  },
+  {
+    "name": "resume-coverage",
+    "markers": ["简历够不够", "内容是否足够", "内容是否已经足够", "提取出来的内容", "项目是否遗漏", "还有什么项目", "项目够不够"],
+    "anchors": ["全量项目整合", "项目覆盖", "简历素材", "工作经历", "项目经历"],
+    "weight": 0.92
+  },
+  {
+    "name": "project-experience",
+    "markers": ["项目经历", "公司项目", "项目怎么写", "项目应该怎么写"],
+    "required_any": ["简历", "求职", "面试", "怎么写", "应该怎么写", "工作经历"],
+    "negative_markers": ["经历了", "重构", "仓库", "目录", "模块", "配置", "故障"],
+    "anchors": ["KYS", "LearnAI", "LeanFlow", "工作经历", "项目经历"],
+    "weight": 0.88
+  },
+  {
+    "name": "skill-update-durable",
+    "markers": ["更新所有skill", "更新所有 skill", "更新全部skill", "更新全部 skill"],
+    "required_any": ["做成命令", "下次", "以后", "记录", "直接更新"],
+    "anchors": ["update-all-skills", "Skill统一更新", "统一命令"],
+    "weight": 0.9
+  },
+  {
+    "name": "cc-switch-safe-update",
+    "markers": ["ccs", "ccswitch", "cc-switch", "cc switch"],
+    "required_any": ["更新", "升级", "最新版", "重启", "退出", "关闭", "kill"],
+    "anchors": ["cc-switch-update --check", "cc-switch-update --restart", "cc-switch-restart", "延迟重启"],
+    "weight": 1.05
+  },
+  {
+    "name": "superpowers-governance",
+    "markers": ["superpower", "superpowers"],
+    "required_any": ["历史", "反作用", "副作用", "启用", "合并", "改回来"],
+    "anchors": ["Skill统一更新", "统一命令", "Superpowers", "默认不全局启用"],
+    "weight": 0.9
+  },
+  {
     "name": "retrieval-expansion",
-    "markers": ["零命中", "没有命中", "扩大范围", "再查", "zero hits", "broaden the search"],
-    "required_any": ["故障", "错误", "异常", "根因", "以前", "历史", "failure", "error", "history"],
-    "anchors": ["故障", "根因", "修复", "issue", "pitfall", "failure", "fix"],
+    "markers": ["零命中", "没有命中", "扩大范围", "再查"],
+    "required_any": ["故障", "错误", "异常", "根因", "以前", "历史"],
+    "anchors": ["故障", "根因", "修复", "重启", "issue", "pitfall"],
     "weight": 0.82
   }
 ]

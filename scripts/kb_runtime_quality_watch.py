@@ -10,31 +10,29 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-if sys.platform == "win32":
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
-    if hasattr(sys.stderr, "reconfigure"):
-        sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+if sys.platform == "win32" and hasattr(sys.stdout, "buffer"):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace", line_buffering=True)
 
 import kb_audit_runtime_value
 import kb_session_brief
-from kb_lib import append_jsonl, kb_base_dir, now_iso, read_jsonl
+from kb_lib import append_jsonl, kb_base_dir, now_iso, read_jsonl, runtime_file
 
 
 def closeout_path(base_dir: Path) -> Path:
-    return base_dir / "_meta" / "closeout.jsonl"
+    return runtime_file("closeout.jsonl", base_dir=base_dir)
 
 
 def session_briefs_path(base_dir: Path) -> Path:
-    return base_dir / "_meta" / "session_briefs.jsonl"
+    return runtime_file("session_briefs.jsonl", base_dir=base_dir)
 
 
 def quality_log_path(base_dir: Path) -> Path:
-    return base_dir / "_meta" / "runtime_quality_log.jsonl"
+    return runtime_file("runtime_quality_log.jsonl", base_dir=base_dir)
 
 
 def watch_state_path(base_dir: Path) -> Path:
-    return base_dir / "_meta" / "runtime_quality_watch_state.json"
+    return runtime_file("runtime_quality_watch_state.json", base_dir=base_dir)
 
 
 def _load_state(path: Path) -> dict[str, Any]:
@@ -145,6 +143,8 @@ def evaluate_closeout(row: dict[str, Any]) -> tuple[list[str], list[str]]:
     hit_entry_ids = set(_as_list(row.get("hit_entry_ids")))
     heated = set(_as_list(row.get("heated_entry_ids")))
     skipped_reason = str(row.get("skipped_reason", "") or "").strip()
+    linked_retrieval_ids = _as_list(row.get("linked_retrieval_ids"))
+    brief_telemetry_present = "session_brief_hit" in row and "session_brief_help" in row
 
     if hit_count > 0 and rag_calls <= 0:
         issues.append("hit_count>0 but rag_calls<=0")
@@ -159,6 +159,10 @@ def evaluate_closeout(row: dict[str, Any]) -> tuple[list[str], list[str]]:
         warnings.append("used entries were not fully heated")
     if row.get("session_brief_ids") == [] and str(row.get("session_brief_skipped_reason", "") or "").strip():
         warnings.append("session brief skipped: " + str(row.get("session_brief_skipped_reason")))
+    if rag_calls > 0 and not linked_retrieval_ids:
+        warnings.append("rag_calls>0 but linked_retrieval_ids missing")
+    if not brief_telemetry_present:
+        warnings.append("session brief telemetry missing")
 
     return issues, warnings
 
@@ -253,6 +257,10 @@ def process_once(
     observed = 0
     issue_count = 0
     warn_count = 0
+    closeout_checked_count = 0
+    linked_retrieval_id_missing_count = 0
+    session_brief_telemetry_missing_count = 0
+    closeout_integrity_missing_count = 0
     repaired_groups = 0
     truncated_sources: list[str] = []
 
@@ -296,6 +304,15 @@ def process_once(
 
             issue_count += len(event.get("issues", []))
             warn_count += len(event.get("warnings", []))
+            if source_name == "closeout":
+                closeout_checked_count += 1
+                warnings = event.get("warnings", [])
+                linked_missing = "rag_calls>0 but linked_retrieval_ids missing" in warnings
+                brief_missing = "session brief telemetry missing" in warnings
+                linked_retrieval_id_missing_count += int(linked_missing)
+                session_brief_telemetry_missing_count += int(brief_missing)
+                if linked_missing or brief_missing:
+                    closeout_integrity_missing_count += 1
             append_jsonl(log_path, event)
 
     if repair_session_briefs:
@@ -311,6 +328,10 @@ def process_once(
         "observed_rows": observed,
         "issue_count": issue_count,
         "warn_count": warn_count,
+        "closeout_checked_count": closeout_checked_count,
+        "linked_retrieval_id_missing_count": linked_retrieval_id_missing_count,
+        "session_brief_telemetry_missing_count": session_brief_telemetry_missing_count,
+        "closeout_integrity_missing_count": closeout_integrity_missing_count,
         "repaired_groups": repaired_groups,
         "truncated_sources": truncated_sources,
         "quality_log_path": str(log_path),

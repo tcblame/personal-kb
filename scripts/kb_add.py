@@ -17,11 +17,9 @@ from kb_sensitive_scan import sensitive_findings
 import kb_evidence
 
 # Windows UTF-8 输出修复
-if sys.platform == 'win32':
-    if hasattr(sys.stdout, 'reconfigure'):
-        sys.stdout.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)
-    if hasattr(sys.stderr, 'reconfigure'):
-        sys.stderr.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)
+if sys.platform == 'win32' and hasattr(sys.stdout, 'buffer'):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace', line_buffering=True)
 
 from kb_lib import (
     JsonlSafetyError,
@@ -588,7 +586,7 @@ def _main(argv: list[str]) -> int:
     findings = sensitive_findings(entry)
     if findings:
         sys.stderr.write(
-            "Sensitive credential-shaped content detected; store a redacted summary or retained evidence reference instead. "
+            "Sensitive credential-shaped content detected in the durable row; retain full bytes as a local asset and store its asset_id, or use a redacted summary. "
             f"finding_types={','.join(findings)}\n"
         )
         return 4
@@ -708,7 +706,7 @@ def _main(argv: list[str]) -> int:
             pass
 
     # 写入日志记录
-    log_dir = kb_base_dir().parent / "runtime" / "logs"
+    log_dir = Path.home() / ".codex" / "personal-kb-logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / "kb_add.log"
     log_entry = {

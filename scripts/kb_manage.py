@@ -221,7 +221,7 @@ def main(argv: list[str]) -> int:
   python kb_manage.py check-aggregation --min-search-count 5
 
   # 查看关键词信息
-  python kb_manage.py keyword-info authentication
+  python kb_manage.py keyword-info 督办
 """
     )
 

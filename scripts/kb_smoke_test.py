@@ -28,10 +28,9 @@ SKILL_MD_MAX_LINES = 500
 
 # 设置 UTF-8 输出（Windows 兼容）
 if sys.platform == 'win32':
-    if hasattr(sys.stdout, 'reconfigure'):
-        sys.stdout.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)
-    if hasattr(sys.stderr, 'reconfigure'):
-        sys.stderr.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 # 颜色输出
 def green(s): return f"\033[92m[OK] {s}\033[0m"
@@ -44,6 +43,12 @@ def check_scripts(skill_dir):
     print("\n=== 1. 检查核心脚本 ===")
     scripts_dir = skill_dir / "scripts"
     required_scripts = [
+        "kb.py",
+        "kb_admin.py",
+        "kb_eval.py",
+        "kb_challenge.py",
+        "kb_release.py",
+        "kb_release_test.py",
         "kb_rag_context.py",
         "kb_add.py",
         "kb_search.py",
@@ -62,10 +67,6 @@ def check_scripts(skill_dir):
         "kb_normalize.py",
         "kb_rebuild_index.py",
         "kb_quality_gate.py",
-        "kb_quality_gate_test.py",
-        "kb_evidence_test.py",
-        "kb_adoption_test.py",
-        "kb_git_safety_test.py",
         "kb_lib.py"
     ]
 
@@ -462,6 +463,7 @@ def main():
     if len(sys.argv) > 1:
         skill_dir = Path(sys.argv[1])
     else:
+        # Validate the checked-out Skill itself; storage is resolved by config.json.
         skill_dir = Path(__file__).resolve().parent.parent
 
     if not skill_dir.exists():

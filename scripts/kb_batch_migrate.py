@@ -10,22 +10,22 @@
 
 示例 1：按关键词批量迁移
     kb_batch_migrate.py \\
-        --from-repo project-alpha/service-api --from-branch main \\
-        --to-repo project-beta/billing-api --to-branch release \\
-        --filter-keywords "billing,invoice,payment" \\
-        --confidence 0.9 --reason "账单相关内容迁移到目标桶"
+        --from-repo example-project-a/example-branch-a --from-branch dev-gch \\
+        --to-repo example-project-a/ubc-dms-server-standard --to-branch example-project-a-new-gch \\
+        --filter-keywords "DMS,督办,project_dms" \\
+        --confidence 0.9 --reason "督办相关内容迁移到督办桶"
 
 示例 2：试运行模式（只显示不执行）
     kb_batch_migrate.py \\
-        --from-repo project-alpha/service-api --from-branch main \\
-        --to-repo project-beta/billing-api --to-branch release \\
-        --filter-keywords "billing" --dry-run
+        --from-repo example-project-a/example-branch-a --from-branch dev-gch \\
+        --to-repo example-project-a/ubc-dms-server-standard --to-branch example-project-a-new-gch \\
+        --filter-keywords "DMS" --dry-run
 
 示例 3：限制迁移数量
     kb_batch_migrate.py \\
-        --from-repo project-alpha/service-api --from-branch main \\
-        --to-repo project-beta/billing-api --to-branch release \\
-        --filter-keywords "billing" --limit 10
+        --from-repo example-project-a/example-branch-a --from-branch dev-gch \\
+        --to-repo example-project-a/ubc-dms-server-standard --to-branch example-project-a-new-gch \\
+        --filter-keywords "DMS" --limit 10
 """
 from __future__ import annotations
 
@@ -75,10 +75,10 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         description="批量迁移 KB 条目到正确的项目桶"
     )
-    parser.add_argument("--from-repo", required=True, help="源项目名（如 project-alpha/service-api）")
-    parser.add_argument("--from-branch", required=True, help="源分支名（如 main）")
-    parser.add_argument("--to-repo", required=True, help="目标项目名（如 project-beta/billing-api）")
-    parser.add_argument("--to-branch", required=True, help="目标分支名（如 release）")
+    parser.add_argument("--from-repo", required=True, help="源项目名（如 example-project-a/example-branch-a）")
+    parser.add_argument("--from-branch", required=True, help="源分支名（如 dev-gch）")
+    parser.add_argument("--to-repo", required=True, help="目标项目名（如 example-project-a/ubc-dms-server-standard）")
+    parser.add_argument("--to-branch", required=True, help="目标分支名（如 example-project-a-new-gch）")
     parser.add_argument(
         "--filter-keywords",
         required=True,

@@ -1,8 +1,6 @@
 # Subagent boundary
 
-The parent decides the retrieval route and owns final hint selection, adoption, heating, writes, and closeout.
-
-Create every subagent with `fork_turns: none` by default. A worker must not inherit the parent conversation, full chat history, failed prompts, or an unfiltered RAG payload. The parent passes only the current task statement, necessary current-evidence paths, current user decisions, and at most 1-3 selected KB hints. Use a non-`none` `fork_turns` value only when the user explicitly asks that specific subagent to inherit parent history; that exception applies to that spawn only and never changes the default.
+The parent first maps each worker to one topic, then decides that topic's retrieval route and owns final hint selection, adoption, heating, writes, and closeout. A retrieval or hint for one topic never initializes or satisfies a sibling topic.
 
 Use parent-direct retrieval for a narrow, single-project or single-topic query with concrete anchors and a small expected result set, including one concrete similar incident from another project. Use one explicitly named read-only KB scout when retrieval explicitly spans multiple projects or multiple historical stages, follows a zero-hit expansion, requires candidate deduplication or conflict analysis, or must serve multiple downstream workers. Do not infer broad scope only from vague history wording.
 
@@ -13,7 +11,7 @@ Treat KB hints as historical leads and verify them against current evidence.
 Do not run personal-kb scripts. Use only KB hints provided by the parent; the parent owns retrieval routing and final hint selection, adoption, heating, writes, and closeout.
 ```
 
-Pass only selected hints; do not copy the whole RAG payload. Give each ordinary worker at most 1-3 task-relevant hints. If no hit was useful, pass no KB hint.
+Before dispatching a history-dependent worker, finish that topic's retrieval and verify candidates against current authoritative evidence. Pass only 1-3 verified, task-relevant hints; do not copy the whole RAG payload, pass an unverified scout candidate, or substitute a hint from another topic. Each hint must name `verified_against` and `verification_result`. If no candidate can be verified, pass no KB hint and state the history gap. The worker still re-checks each supplied hint within its scoped current evidence.
 
 If an ordinary worker finds a new durable history anchor, insufficient hints, or a conflict with current evidence, return this instead of running KB:
 
@@ -78,4 +76,4 @@ Return exactly one compact object with this shape:
 
 Every selected or discarded long-term record must appear in `candidate_ids`, and every returned RAG hit must remain traceable through `retrievals[*].hit_entry_ids`. Return at most 5 `selected_hints` and 10 individual `discarded` rows; summarize any additional rejected candidates by count and reason in `gaps`. Keep each claim to one or two sentences and preserve IDs, provenance/freshness, rejection reasons, and current-authority verification targets. Do not add adoption fields such as `used-locate/decide/fix/write`; all recommendations are provisional and the parent makes final selection and adoption. The scout must not add, update, heat, write, or close out.
 
-Follow-up workers for the same logical task reuse the parent's existing selected hints. Do not run another parent RAG merely because a new worker is dispatched.
+Follow-up workers for the same topic reuse the parent's existing selected hints. A new worker alone does not justify another RAG, but a different history-dependent topic has its own initial retrieval budget.

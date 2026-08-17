@@ -5,20 +5,17 @@ Read this file only for explicit Personal KB quality, effectiveness, or runtime 
 Audit three independent layers:
 
 1. Trigger and lifecycle: expected retrieval, per-turn missing closeout, and subagent boundary violations.
-2. Retrieval value: persisted receipt hits, linked outcome events, locate/decide/fix/write adoption, rejected hits, and session-brief help.
+2. Retrieval value: returned hit slots, locate/decide/fix/write adoption, rejected hits, and session-brief help.
 3. Corpus quality: lifecycle status, duplicates, evidence alignment, freshness, resolvable paths, artifact-locator share, and sensitive content.
 
 Use current session JSONL and runtime logs as evidence. Runtime and derived data are measurements, not durable facts.
 
-```powershell
-$SkillRoot = '<absolute path to the installed personal-kb directory>'
-$Python = '<absolute path to a Python executable>'
-$env:PYTHONUTF8 = '1'
-$env:PYTHONIOENCODING = 'utf-8'
-& $Python "$SkillRoot\scripts\kb_audit_codex_sessions.py" --last-days 2
-& $Python "$SkillRoot\scripts\kb_record_codex_effectiveness.py" `
+```bash
+python3 <skill-root>/scripts/kb_audit_codex_sessions.py --last-days 2
+python3 <skill-root>/scripts/kb_record_codex_effectiveness.py \
   --current-cutoff YYYY-MM-DD --strict-quality
-& $Python "$SkillRoot\scripts\kb_audit_runtime_value.py" --last-days 2
+python3 <skill-root>/scripts/kb_audit_runtime_value.py --last-days 2
+python3 <skill-root>/scripts/kb_eval.py audit --last-days 2
 ```
 
 Identity and pairing rules:
@@ -27,8 +24,6 @@ Identity and pairing rules:
 - Keep root and subagent metrics separate even when they share a parent `session_id`.
 - Link a delegated scout retrieval to the parent only through an exact runtime `retrieval_id`, an explicit parent closeout link, and the rollout `parent_thread_id`. Never guess a cross-rollout link from query similarity or timing alone.
 - Pair retrieval and closeout by turn/query/call evidence; an old closeout elsewhere in a long session does not close a later retrieval.
-- Pair an outcome only through its exact persisted `retrieval_id` and `entry_id`; never infer the link from similar text, paths, or timestamps.
-- Treat outcome acceptance, rejection, and recurrence as observed application feedback. Use it to trigger recheck and evidence maintenance; do not silently reinterpret it as proof that the durable record is universally true or false.
 - Apply the requested date window to sessions and closeout rows.
 - Treat explicit Personal KB runtime audits as direct session/runtime inspection, not as missed long-term RAG.
 
@@ -38,8 +33,11 @@ Metric semantics:
 - Decide/fix/write without required heat is an error.
 - Hits rejected with a non-empty reason are measured as rejection, not malformed closeout.
 - Count real script execution, not text mentions or source-file reads.
+- Treat `kb.py retrieve/search/remember/update/closeout` as their focused command equivalents.
 - Do not count `kb_*.py --help` as retrieval, maintenance, or closeout usage.
 - Count per-entry adoption as confirmed only when actual closeout JSON exposes successful IDs; keep silent-command `--used-*` values as requested/unconfirmed and report session briefs separately.
 - Treat summaries generated before the current window as stale until rebuilt.
 
 Keep main-session metrics separate from ordinary subagent behavior. Do not expose routine telemetry in normal answers; surface actionable findings only when the user asks for an audit.
+
+Challenge proposals and resolutions are runtime audit events, not adoption proof. A critic that writes the durable KB or closes out its own proposal is a quality failure.

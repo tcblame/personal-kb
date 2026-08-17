@@ -23,14 +23,6 @@ def _source_exists(value: str, *, workspace_root: Path) -> bool:
     return path.exists()
 
 
-def _entry_workspace(entry: dict[str, Any], *, fallback: Path) -> Path:
-    value = str(entry.get("workspace_dir") or "").strip()
-    if not value:
-        return fallback
-    path = Path(value).expanduser()
-    return path if path.is_absolute() else fallback / path
-
-
 def _valid_evidence_ref(value: Any) -> bool:
     return (
         isinstance(value, dict)
@@ -138,7 +130,6 @@ def audit(root: Path, *, keep_from: str) -> dict[str, Any]:
 
         sources = _string_list(entry.get("source_paths"))
         refs = entry.get("evidence_refs") if isinstance(entry.get("evidence_refs"), list) else []
-        entry_workspace = _entry_workspace(entry, fallback=workspace_root)
         if not sources and not refs:
             violations.append({"entry": prefix, "issue": "missing evidence pointer"})
         resolved_for_entry = 0
@@ -146,7 +137,7 @@ def audit(root: Path, *, keep_from: str) -> dict[str, Any]:
             source_total += 1
             if source.startswith(("commit:", "conversation:")):
                 violations.append({"entry": prefix, "issue": f"typed ref stored in source_paths: {source.split(':', 1)[0]}"})
-            elif _source_exists(source, workspace_root=entry_workspace):
+            elif _source_exists(source, workspace_root=workspace_root):
                 source_resolved += 1
                 resolved_for_entry += 1
         valid_refs = [ref for ref in refs if _valid_evidence_ref(ref)]

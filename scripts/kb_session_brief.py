@@ -10,13 +10,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-if sys.platform == "win32":
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
-    if hasattr(sys.stderr, "reconfigure"):
-        sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+if sys.platform == "win32" and hasattr(sys.stdout, "buffer"):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace", line_buffering=True)
 
-from kb_lib import append_jsonl, generate_entry_id, kb_base_dir, now_iso, read_jsonl, resolve_context
+from kb_lib import append_jsonl, generate_entry_id, kb_base_dir, now_iso, read_jsonl, resolve_context, runtime_file
 
 
 CURRENT_BRIEF_STATUSES = {"", "active", "current"}
@@ -47,8 +45,8 @@ LOW_SIGNAL_TERMS = {
 
 
 def session_briefs_path(base_dir: Path | None = None) -> Path:
-    base = base_dir if base_dir is not None else kb_base_dir()
-    return base / "_meta" / "session_briefs.jsonl"
+    effective_base = kb_base_dir() if base_dir is None else base_dir
+    return runtime_file("session_briefs.jsonl", base_dir=effective_base)
 
 
 def _clip(text: str, limit: int) -> str:

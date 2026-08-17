@@ -2,7 +2,7 @@
 
 Read this file only for explicit Personal KB maintenance.
 
-Treat `personal-kb/repos/**/kb.jsonl` and explicit archives as durable facts that may be versioned in Git. Treat retrieval receipts, outcome events, closeout logs, session briefs, adoption events, locks, backups, indexes, aggregations, and effectiveness logs as runtime or derived state. Do not hand-edit receipt or outcome JSONL; use their CLIs so linkage and ID conflicts are checked under lock.
+Treat `<storage.root>/<records>/**/kb.jsonl` and explicit retained evidence as durable local facts. Treat closeout logs, session briefs, adoption events, challenge proposals, locks, backups, indexes, aggregations, and effectiveness logs as runtime or derived state. The configured paths are authoritative; do not assume `repos/_meta` or a home-directory fallback.
 
 For archive, migrate, normalize, rebuild, or retention work:
 
@@ -12,20 +12,17 @@ For archive, migrate, normalize, rebuild, or retention work:
 4. Rebuild derived indexes only after durable records change.
 5. Run quality and sensitive-data gates.
 
-An explicit repo or branch override must short-circuit discovery. A safe workspace-parent fallback is valid and silent; record its reason in telemetry. Fail only when routing cannot be made safe.
+An explicit repo or branch override must short-circuit discovery. A safe workspace-parent fallback is valid and silent; record its reason in telemetry. Fail only when routing cannot be made safe. There is one physical root; never “repair” a routing issue by creating another KB root.
 
 Common maintenance commands:
 
-```powershell
-$SkillRoot = '<absolute path to the installed personal-kb directory>'
-$Python = '<absolute path to a Python executable>'
-$env:PYTHONUTF8 = '1'
-$env:PYTHONIOENCODING = 'utf-8'
-& $Python "$SkillRoot\scripts\kb_quality_gate.py" --keep-from 2026-07-01 --strict
-& $Python "$SkillRoot\scripts\kb_rebuild_index.py" --apply `
-  --root "$SkillRoot\storage\repos"
-& $Python "$SkillRoot\scripts\kb_sensitive_scan.py" `
-  --root "$SkillRoot\storage" --include-backups --json
+```bash
+python3 <skill-root>/scripts/kb_admin.py quality-gate --keep-from 2026-07-01 --strict
+python3 <skill-root>/scripts/kb_admin.py rebuild-index --apply
+python3 <skill-root>/scripts/kb_admin.py sensitive-scan --include-backups --json
+python3 <skill-root>/scripts/kb_admin.py archive --dry-run
 ```
 
-Do not encode one-time retention permissions or dated migrations in the main Skill. Keep them in project decisions or maintenance configuration.
+Use `kb.py retain` for full local evidence, including credential-bearing files when complete archival is requested. Use `kb.py reference` only for material that remains in an external credential or resource system. Retention defaults to a plaintext `copy`; an original file may remain plaintext too. Do not call it encryption, password protection, or secure deletion. Do not add a vault abstraction to this version.
+
+Before publishing, run the allowlist exporter and scan its output. It must exclude the real `config.json`, the complete data root, manifests, runtime logs, and absolute origin/stored paths. Do not export a sanitized copy by overwriting the source data.

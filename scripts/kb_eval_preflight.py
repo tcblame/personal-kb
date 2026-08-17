@@ -47,7 +47,9 @@ SCOUT_BRIEF_SCHEMA = "personal-kb.scout-brief/v1"
 FORBID_RE = re.compile(
     r"禁止.{0,12}(?:personal[- ]?kb|\bkb\b|知识库)|"
     r"不要.{0,12}(?:personal[- ]?kb|\bkb\b|知识库)|"
-    r"do not run personal-kb|without (?:using )?(?:personal[- ]?kb|kb)",
+    r"do not run personal-kb|"
+    r"do not (?:use|reuse|reference).{0,24}(?:personal[- ]?kb|(?:parent )?kb hints?|\bkb\b)|"
+    r"without (?:using )?(?:personal[- ]?kb|kb)",
     re.I,
 )
 AUDIT_RE = re.compile(
@@ -55,7 +57,9 @@ AUDIT_RE = re.compile(
     r"有没有用|是否合适|妨碍|误触发|漏触发|为什么没识别)|"
     r"(?:审计|效果|运行|runtime|会话|历史对话|误触发|漏触发|为什么没识别).{0,36}"
     r"(?:personal[- ]?kb|\bkb\b|(?:个人|本地).{0,8}知识库)|"
-    r"codex.{0,24}历史对话.{0,64}(?:skill\s*影响|为什么.{0,8}没识别)",
+    r"codex.{0,24}历史对话.{0,64}(?:skill\s*影响|为什么.{0,8}没识别)|"
+    r"(?:多agent|多 Agent|分析|看看).{0,24}(?:历史对话|会话).{0,24}"
+    r"(?:kb|personal[- ]?kb|知识库|skill).{0,24}(?:优化|合适|良性|妨碍|有没有用|是否需要)",
     re.I,
 )
 MAINTAIN_RE = re.compile(
@@ -78,6 +82,7 @@ DURABLE_REQUEST_RE = re.compile(
 )
 HISTORY_DEP_RE = re.compile(
     r"之前的那个|前两天|上次|以前.{0,28}(?:遇到|确认|决定|说过|做过)|"
+    r"之前.{0,20}(?:说过|记录过|确认过|写过命令)|"
     r"我记得.{0,24}(?:之前|以前|说过)|沿用.{0,24}(?:决定|材料|风险|口径)|"
     r"按.{0,16}(?:上次|之前|已确认).{0,16}(?:决定|口径|方案)|"
     r"另一个项目.{0,24}(?:以前|类似)|"
@@ -86,9 +91,44 @@ HISTORY_DEP_RE = re.compile(
     r"(?:agreed|decided|confirmed).{0,32}(?:last time|previously)",
     re.I,
 )
+RECENT_HISTORY_RE = re.compile(
+    r"找一下.{0,28}(?:应该有|之前做过|做过|有设计|设计稿|方案|决定)|"
+    r"为什么每次都要(?:重新|重复).{0,16}(?:安装|配置|登录|输入)|"
+    r"(?:每次都要|又没生效|反复).{0,16}(?:重装|重新安装|重新配置)|"
+    r"分析最近.{0,24}(?:codex|对话|会话|历史记录|历史对话)|"
+    r"最近.{0,16}(?:codex|对话|会话).{0,20}(?:记录|历史)|"
+    r"昨天.{0,24}(?:会话|对话|确认过|决定过)|"
+    r"(?:历史记录|旧记录)里有没有.{0,24}(?:决定|合并|确认|方案)",
+    re.I,
+)
+CC_SWITCH_SAFE_OPERATION_RE = re.compile(
+    r"(?:(?:更新|升级|检查更新|重启|退出|关闭|kill).{0,24}(?:ccs|ccswitch|cc[- ]switch)|"
+    r"(?:ccs|ccswitch|cc[- ]switch).{0,24}(?:更新|升级|检查更新|最新版|重启|退出|关闭|kill))",
+    re.I,
+)
+CC_SWITCH_CURRENT_DIAGNOSTIC_RE = re.compile(
+    r"(?=.*(?:ccs|ccswitch|cc[- ]switch))"
+    r"(?=.*(?:检查|查看|看看|确认|排查|分析|为什么|是否|当前|现在|进程|日志|状态))"
+    r"(?=.*(?:关闭|退出|停止|kill|进程|日志|状态|卡死))",
+    re.I,
+)
+CC_SWITCH_HIGH_RISK_RE = re.compile(
+    r"(?=(?:ccs|ccswitch|cc[- ]switch))"
+    r"(?=.*(?:guard|127\.0\.0\.1|localhost|本地地址|回环地址|高危|危险操作|"
+    r"安全重启|延迟重启|守护进程|被改回|改回本地))",
+    re.I,
+)
+TOPIC_BOUNDARY_RE = re.compile(r"(?:[。；;\n]+|(?:，|,)?(?:然后|另外|同时|顺带|并且)(?:再)?(?:，|,)?)")
+WORKER_SCRIPT_GUARD_RE = re.compile(r"do not run personal-kb scripts\.?", re.I)
 EXPLICIT_RETRIEVAL_RE = re.compile(
-    r"(?:查|搜|找|看|检索|回看).{0,24}(?:历史记录|旧记录|personal[- ]?kb|\bkb\b|知识库)|"
-    r"(?:personal[- ]?kb|\bkb\b|知识库).{0,24}(?:查|搜|找|检索|召回)",
+    r"(?:(?:帮我|请|去|现在|先|直接)\s*)?"
+    r"(?:查(?:一查|找)?|搜(?:一搜|索)?|找(?:一找)?|看(?:一下)?|回看|检索(?:一下)?)"
+    r"\s*(?:一下|一遍)?\s*"
+    r"(?:历史记录|旧记录|历史对话|个人(?:知识库|记录|经验)|personal[- ]?kb|\bkb\b|知识库)|"
+    r"(?:历史记录|旧记录|历史对话|个人(?:知识库|记录|经验)|personal[- ]?kb|\bkb\b|知识库)"
+    r"\s*(?:里|中|上)?\s*(?:有没有|是否有|是否)|"
+    r"(?:personal[- ]?kb|\bkb\b|知识库).{0,12}"
+    r"(?:(?:请|帮我|去|直接|现在)\s*(?:查|搜|找|检索|召回)|(?:查|搜|找))",
     re.I,
 )
 MAPPING_RE = re.compile(
@@ -97,8 +137,8 @@ MAPPING_RE = re.compile(
     re.I,
 )
 CURRENT_EVIDENCE_RE = re.compile(
-    r"当前(?:文件|代码|日志|异常栈|配置).{0,24}(?:足够|完整|已经给出|可以回答)|"
-    r"只看当前(?:文件|代码|日志|配置)|fully answerable from current",
+    r"当前(?:ccs|ccswitch|cc[- ]switch)?.{0,16}?(?:文件|代码|日志|异常栈|配置).{0,24}(?:足够|完整|已经给出|可以回答)|"
+    r"只看当前(?:ccs|ccswitch|cc[- ]switch)?.{0,16}?(?:文件|代码|日志|配置)|fully answerable from current",
     re.I,
 )
 REJECT_HISTORY_RE = re.compile(
@@ -110,7 +150,9 @@ REJECT_HISTORY_RE = re.compile(
 CURRENT_TASK_RE = re.compile(
     r"当前文件.{0,28}(?:修改|改名|替换)|第\s*\d+\s*行|运行.{0,20}(?:单测|测试)|"
     r"(?:我的|当前)?项目.{0,20}(?:有用到|用过|使用)|"
-    r"重构.{0,28}(?:前端|页面)|(?:卡死|无法点击|无法输入中文).{0,30}(?:看看|分析|为什么)",
+    r"重构.{0,28}(?:前端|页面)|(?:卡死|无法点击|无法输入中文).{0,30}(?:看看|分析|为什么)|"
+    r"分析简历.{0,24}(?:技术|项目)|"
+    r"(?:不打算|要不要).{0,24}(?:写|放).{0,16}(?:项目|简历).{0,24}(?:合适|技术含量)",
     re.I,
 )
 PRIVATE_IP_RE = re.compile(
@@ -276,8 +318,9 @@ def predict_preflight(
     context = dict(context or {})
     text = _normalize_text(prompt)
     role = str(context.get("agent_role") or "parent").strip().lower()
+    forbid_text = WORKER_SCRIPT_GUARD_RE.sub("", text) if role in ORDINARY_SUBAGENT_ROLES else text
 
-    if context.get("explicit_kb_forbidden") or FORBID_RE.search(text):
+    if context.get("explicit_kb_forbidden") or FORBID_RE.search(forbid_text):
         return _prediction(
             "skip",
             ["explicit_kb_forbidden"],
@@ -287,19 +330,21 @@ def predict_preflight(
         )
 
     if role in ORDINARY_SUBAGENT_ROLES:
-        worker_needs_parent_history = bool(
+        parent_provided_hints = bool(context.get("parent_provided_kb_hints"))
+        new_history_work = bool(
             context.get("kb_followup_required")
-            or context.get("cross_session_dependency")
+            or context.get("new_history_anchor")
+            or context.get("retrieval_expansion_required")
+            or context.get("history_conflict")
+        )
+        unresolved_history_dependency = bool(
+            context.get("cross_session_dependency")
             or HISTORY_DEP_RE.search(text)
+            or RECENT_HISTORY_RE.search(text)
             or EXPLICIT_RETRIEVAL_RE.search(text)
-            or (
-                context.get("parent_provided_kb_hints")
-                and (
-                    context.get("new_history_anchor")
-                    or context.get("retrieval_expansion_required")
-                    or context.get("history_conflict")
-                )
-            )
+        )
+        worker_needs_parent_history = bool(
+            new_history_work or (unresolved_history_dependency and not parent_provided_hints)
         )
         if worker_needs_parent_history:
             return _prediction(
@@ -310,7 +355,7 @@ def predict_preflight(
                 kb_owner="parent",
                 parent_followup_required=True,
             )
-        if context.get("parent_provided_kb_hints"):
+        if parent_provided_hints:
             return _prediction(
                 "reuse_parent_hints",
                 ["ordinary_subagent_reuses_parent_hints"],
@@ -404,14 +449,24 @@ def predict_preflight(
             kb_owner="parent",
         )
 
+    durable_request = bool(DURABLE_REQUEST_RE.search(text))
+    safe_operation_history = bool(
+        CC_SWITCH_SAFE_OPERATION_RE.search(text)
+        and not CC_SWITCH_CURRENT_DIAGNOSTIC_RE.search(text)
+    )
+    high_risk_config_history = bool(
+        CC_SWITCH_HIGH_RISK_RE.search(text) and not CURRENT_EVIDENCE_RE.search(text)
+    )
     history_dependency = bool(
         HISTORY_DEP_RE.search(text)
+        or RECENT_HISTORY_RE.search(text)
         or EXPLICIT_RETRIEVAL_RE.search(text)
         or (MAPPING_RE.search(text) and (HISTORY_DEP_RE.search(text) or context.get("cross_session_dependency")))
         or context.get("cross_session_dependency")
         or context.get("new_history_anchor")
+        or (safe_operation_history and not durable_request)
+        or high_risk_config_history
     )
-    durable_request = bool(DURABLE_REQUEST_RE.search(text))
     if durable_request and not history_dependency:
         return _prediction(
             "maintain",
@@ -446,6 +501,12 @@ def predict_preflight(
             reasons.append("explicit_history_retrieval")
         if HISTORY_DEP_RE.search(text) or context.get("cross_session_dependency"):
             reasons.append("cross_session_dependency")
+        if RECENT_HISTORY_RE.search(text):
+            reasons.append("recent_history_reference")
+        if safe_operation_history:
+            reasons.append("durable_safe_operation_rule")
+        if high_risk_config_history:
+            reasons.append("high_risk_cc_switch_config")
         if owner == "kb_scout" and role not in KB_SCOUT_ROLES:
             reasons.append("broad_retrieval_delegated_to_kb_scout")
         return _prediction(
@@ -478,6 +539,86 @@ def predict_preflight(
         prompt=text,
         context=context,
     )
+
+
+def predict_topic_preflights(
+    topics: list[dict[str, Any]],
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Evaluate independently identified topics without sharing retrieval state."""
+    if not isinstance(topics, list) or not topics:
+        raise ValueError("topics must be a non-empty list")
+
+    shared_context = dict(context or {})
+    initialized_topic_ids = {
+        str(value).strip()
+        for value in shared_context.pop("initialized_topic_ids", [])
+        if str(value).strip()
+    }
+    # Task-wide state must not suppress a sibling topic. Callers track initialized
+    # work with initialized_topic_ids instead.
+    for key in ("duplicate_logical_task", "initial_retrieval_already_done", "logical_task_completed"):
+        shared_context.pop(key, None)
+
+    topic_results: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for index, topic in enumerate(topics):
+        if not isinstance(topic, dict):
+            raise ValueError(f"topic {index} must be an object")
+        topic_id = str(topic.get("id") or "").strip()
+        topic_prompt = _normalize_text(str(topic.get("prompt") or ""))
+        if not topic_id or not topic_prompt:
+            raise ValueError(f"topic {index} requires non-empty id and prompt")
+        if topic_id in seen_ids:
+            raise ValueError(f"duplicate topic id: {topic_id}")
+        seen_ids.add(topic_id)
+
+        topic_context = dict(shared_context)
+        raw_topic_context = topic.get("context") or {}
+        if not isinstance(raw_topic_context, dict):
+            raise ValueError(f"topic {topic_id} context must be an object")
+        topic_context.update(raw_topic_context)
+        if topic_id in initialized_topic_ids:
+            topic_context["initial_retrieval_already_done"] = True
+
+        topic_results.append(
+            {
+                "topic_id": topic_id,
+                "prompt": topic_prompt,
+                "prediction": predict_preflight(topic_prompt, topic_context),
+            }
+        )
+
+    return {
+        "schema": "personal-kb.topic-preflight/v1",
+        "topic_count": len(topic_results),
+        "initial_retrieval_count": sum(
+            int(item["prediction"]["retrieval_plan"]["initial_retrieval_count"])
+            for item in topic_results
+        ),
+        "topics": topic_results,
+    }
+
+
+def predict_request_preflights(
+    prompt: str,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Split an explicit multi-subject request for deterministic policy simulation."""
+    request_context = dict(context or {})
+    explicit_topics = request_context.pop("topics", None)
+    if explicit_topics is not None:
+        if not isinstance(explicit_topics, list):
+            raise ValueError("context.topics must be a list")
+        return predict_topic_preflights(explicit_topics, request_context)
+
+    parts = [part.strip(" ，,") for part in TOPIC_BOUNDARY_RE.split(_normalize_text(prompt))]
+    topic_prompts = [part for part in parts if part]
+    topics = [
+        {"id": f"topic-{index}", "prompt": topic_prompt}
+        for index, topic_prompt in enumerate(topic_prompts, start=1)
+    ]
+    return predict_topic_preflights(topics, request_context)
 
 
 def _read_json_or_jsonl(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -551,6 +692,50 @@ def validate_cases(
         should_retrieve = _expected_should_retrieve(expected)
         if should_retrieve != (action == "retrieve"):
             raise ValueError(f"case {case_id} action/should_retrieve are inconsistent")
+        topic_preflight = expected.get("topic_preflight")
+        if topic_preflight is not None:
+            if not isinstance(topic_preflight, dict):
+                raise ValueError(f"case {case_id} expected.topic_preflight must be an object")
+            expected_topic_count = topic_preflight.get("topic_count")
+            expected_initial_count = topic_preflight.get("initial_retrieval_count")
+            expected_topics = topic_preflight.get("topics")
+            if (
+                not isinstance(expected_topic_count, int)
+                or isinstance(expected_topic_count, bool)
+                or expected_topic_count < 1
+            ):
+                raise ValueError(
+                    f"case {case_id} expected.topic_preflight.topic_count must be >= 1"
+                )
+            if (
+                not isinstance(expected_initial_count, int)
+                or isinstance(expected_initial_count, bool)
+                or expected_initial_count < 0
+            ):
+                raise ValueError(
+                    f"case {case_id} expected.topic_preflight.initial_retrieval_count must be >= 0"
+                )
+            if not isinstance(expected_topics, list) or len(expected_topics) != expected_topic_count:
+                raise ValueError(
+                    f"case {case_id} expected.topic_preflight.topics must match topic_count"
+                )
+            for topic_index, topic_expected in enumerate(expected_topics, start=1):
+                if not isinstance(topic_expected, dict):
+                    raise ValueError(
+                        f"case {case_id} expected topic {topic_index} must be an object"
+                    )
+                topic_action = str(topic_expected.get("action") or "").strip()
+                if topic_action not in ACTIONS:
+                    raise ValueError(
+                        f"case {case_id} expected topic {topic_index} has invalid action: {topic_action}"
+                    )
+                forbidden_terms = topic_expected.get("query_forbidden_terms", [])
+                if not isinstance(forbidden_terms, list) or any(
+                    not isinstance(value, str) for value in forbidden_terms
+                ):
+                    raise ValueError(
+                        f"case {case_id} expected topic {topic_index} query_forbidden_terms must be strings"
+                    )
         if require_retrieval_expectation and should_retrieve:
             expectation = case.get("retrieval_expectation")
             if not isinstance(expectation, dict):
@@ -660,6 +845,85 @@ def _query_anchor_failures(query: str, groups: Any) -> list[list[str]]:
     return failures
 
 
+def _evaluate_topic_preflight(
+    prompt: str,
+    context: dict[str, Any],
+    expected: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    prediction = predict_request_preflights(prompt, context)
+    expected_topics = expected.get("topics") if isinstance(expected.get("topics"), list) else []
+    actual_topics = prediction.get("topics") if isinstance(prediction.get("topics"), list) else []
+    topic_checks: list[dict[str, Any]] = []
+
+    for index, topic_expected in enumerate(expected_topics):
+        actual = actual_topics[index] if index < len(actual_topics) else {}
+        topic_prediction = (
+            actual.get("prediction") if isinstance(actual.get("prediction"), dict) else {}
+        )
+        retrieval_plan = (
+            topic_prediction.get("retrieval_plan")
+            if isinstance(topic_prediction.get("retrieval_plan"), dict)
+            else {}
+        )
+        query = str(retrieval_plan.get("query") or "")
+        forbidden_terms = [
+            str(value).strip()
+            for value in topic_expected.get("query_forbidden_terms", [])
+            if str(value).strip()
+        ]
+        forbidden_hits = [
+            term for term in forbidden_terms if term.casefold() in query.casefold()
+        ]
+        anchor_failures = _query_anchor_failures(
+            query,
+            topic_expected.get("query_anchor_groups"),
+        )
+        expected_action = str(topic_expected.get("action") or "")
+        expected_route = str(topic_expected.get("retrieval_route") or "")
+        expected_owner = str(topic_expected.get("kb_owner") or "")
+        expected_initial = topic_expected.get("initial_retrieval_count")
+        checks = {
+            "topic_id_ok": (
+                not topic_expected.get("topic_id")
+                or actual.get("topic_id") == topic_expected.get("topic_id")
+            ),
+            "action_ok": topic_prediction.get("action") == expected_action,
+            "owner_ok": not expected_owner or topic_prediction.get("kb_owner") == expected_owner,
+            "route_ok": not expected_route or retrieval_plan.get("route") == expected_route,
+            "initial_retrieval_count_ok": (
+                expected_initial is None
+                or retrieval_plan.get("initial_retrieval_count") == expected_initial
+            ),
+            "query_anchor_failures": anchor_failures,
+            "query_forbidden_hits": forbidden_hits,
+        }
+        checks["pass"] = bool(
+            checks["topic_id_ok"]
+            and checks["action_ok"]
+            and checks["owner_ok"]
+            and checks["route_ok"]
+            and checks["initial_retrieval_count_ok"]
+            and not anchor_failures
+            and not forbidden_hits
+        )
+        topic_checks.append(checks)
+
+    summary = {
+        "topic_count_ok": prediction.get("topic_count") == expected.get("topic_count"),
+        "initial_retrieval_count_ok": (
+            prediction.get("initial_retrieval_count") == expected.get("initial_retrieval_count")
+        ),
+        "topics": topic_checks,
+    }
+    summary["pass"] = bool(
+        summary["topic_count_ok"]
+        and summary["initial_retrieval_count_ok"]
+        and len(actual_topics) == len(expected_topics)
+        and all(item.get("pass") for item in topic_checks)
+    )
+    return prediction, summary
+
+
 def evaluate_cases(cases: list[dict[str, Any]]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     validate_cases(cases)
     details: list[dict[str, Any]] = []
@@ -673,6 +937,8 @@ def evaluate_cases(cases: list[dict[str, Any]]) -> tuple[dict[str, Any], list[di
     false_positives = 0
     false_negatives = 0
     query_anchor_failure_count = 0
+    topic_preflight_total = 0
+    topic_preflight_correct = 0
 
     for index, case in enumerate(cases):
         case_id = str(case.get("id") or case.get("case_id") or f"case-{index + 1}")
@@ -702,6 +968,17 @@ def evaluate_cases(cases: list[dict[str, Any]]) -> tuple[dict[str, Any], list[di
             str(prediction["retrieval_plan"].get("query") or ""),
             expected.get("query_anchor_groups"),
         )
+        expected_topic_preflight = expected.get("topic_preflight")
+        request_prediction: dict[str, Any] | None = None
+        topic_preflight_checks: dict[str, Any] | None = None
+        if isinstance(expected_topic_preflight, dict):
+            topic_preflight_total += 1
+            request_prediction, topic_preflight_checks = _evaluate_topic_preflight(
+                prompt,
+                context,
+                expected_topic_preflight,
+            )
+            topic_preflight_correct += int(bool(topic_preflight_checks.get("pass")))
 
         phase_correct += int(phase_ok)
         retrieve_correct += int(retrieve_ok)
@@ -714,11 +991,30 @@ def evaluate_cases(cases: list[dict[str, Any]]) -> tuple[dict[str, Any], list[di
             coordination_correct += int(route_ok and handoff_ok)
         false_positives += int(not expected_retrieve and prediction["should_retrieve"])
         false_negatives += int(expected_retrieve and not prediction["should_retrieve"])
-        query_anchor_failure_count += int(bool(anchor_failures))
+        topic_anchor_failures = bool(
+            topic_preflight_checks
+            and any(
+                item.get("query_anchor_failures")
+                for item in topic_preflight_checks.get("topics", [])
+            )
+        )
+        query_anchor_failure_count += int(bool(anchor_failures) or topic_anchor_failures)
         public_prediction = json.loads(json.dumps(prediction, ensure_ascii=False))
         public_prediction["retrieval_plan"]["query"] = _redact(
             str(public_prediction["retrieval_plan"].get("query") or "")
         )
+        public_request_prediction = None
+        if request_prediction is not None:
+            public_request_prediction = json.loads(
+                json.dumps(request_prediction, ensure_ascii=False)
+            )
+            for topic in public_request_prediction.get("topics", []):
+                topic_prediction = topic.get("prediction") if isinstance(topic, dict) else None
+                if not isinstance(topic_prediction, dict):
+                    continue
+                retrieval_plan = topic_prediction.get("retrieval_plan")
+                if isinstance(retrieval_plan, dict):
+                    retrieval_plan["query"] = _redact(str(retrieval_plan.get("query") or ""))
         details.append(
             {
                 "case_id": case_id,
@@ -730,8 +1026,10 @@ def evaluate_cases(cases: list[dict[str, Any]]) -> tuple[dict[str, Any], list[di
                     "kb_owner": expected_owner or None,
                     "retrieval_route": expected_route or None,
                     "handoff_required": expected_handoff,
+                    "topic_preflight": expected_topic_preflight,
                 },
                 "prediction": public_prediction,
+                "request_prediction": public_request_prediction,
                 "checks": {
                     "action_ok": action_ok,
                     "phase_ok": phase_ok,
@@ -740,6 +1038,7 @@ def evaluate_cases(cases: list[dict[str, Any]]) -> tuple[dict[str, Any], list[di
                     "route_ok": route_ok,
                     "handoff_ok": handoff_ok,
                     "query_anchor_failures": anchor_failures,
+                    "topic_preflight": topic_preflight_checks,
                 },
             }
         )
@@ -759,6 +1058,12 @@ def evaluate_cases(cases: list[dict[str, Any]]) -> tuple[dict[str, Any], list[di
         "false_positive_count": false_positives,
         "false_negative_count": false_negatives,
         "query_anchor_failure_count": query_anchor_failure_count,
+        "topic_preflight_case_total": topic_preflight_total,
+        "topic_preflight_accuracy": (
+            round(topic_preflight_correct / topic_preflight_total, 4)
+            if topic_preflight_total
+            else None
+        ),
     }
     return metrics, details
 
@@ -794,49 +1099,6 @@ def _snapshot_id(fingerprint: dict[str, str]) -> str:
 def _fingerprint_changes(before: dict[str, str], after: dict[str, str]) -> list[str]:
     keys = sorted(set(before) | set(after))
     return [key for key in keys if before.get(key) != after.get(key)]
-
-
-RETRIEVAL_RECEIPTS_RELATIVE_PATH = "repos/_meta/retrieval_receipts.jsonl"
-RETRIEVAL_RECEIPT_SCHEMA = "personal-kb.retrieval-receipt/v1"
-
-
-def _read_jsonl_objects(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    rows: list[dict[str, Any]] = []
-    for line_number, raw in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), start=1):
-        if not raw.strip():
-            continue
-        try:
-            row = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"invalid JSONL at {path}:{line_number}: {exc}") from exc
-        if not isinstance(row, dict):
-            raise ValueError(f"JSONL row must be an object at {path}:{line_number}")
-        rows.append(row)
-    return rows
-
-
-def _expected_receipt_append_is_valid(
-    root: Path,
-    *,
-    before_rows: list[dict[str, Any]],
-    retrieval_ids: list[str],
-) -> bool:
-    try:
-        after_rows = _read_jsonl_objects(root / RETRIEVAL_RECEIPTS_RELATIVE_PATH)
-    except (OSError, UnicodeError, ValueError):
-        return False
-    if after_rows[: len(before_rows)] != before_rows:
-        return False
-    appended = after_rows[len(before_rows) :]
-    if len(appended) != len(retrieval_ids):
-        return False
-    return all(
-        row.get("schema") == RETRIEVAL_RECEIPT_SCHEMA
-        and row.get("retrieval_id") == retrieval_id
-        for row, retrieval_id in zip(appended, retrieval_ids)
-    )
 
 
 def _run_rag_query(
@@ -995,9 +1257,6 @@ def run_retrieval_preflight(
         snapshot_root = Path(temp_dir) / "personal-kb"
         shutil.copytree(production_root, snapshot_root)
         snapshot_before = _tree_fingerprint(snapshot_root)
-        receipt_rows_before = _read_jsonl_objects(
-            snapshot_root / RETRIEVAL_RECEIPTS_RELATIVE_PATH
-        )
         for index, case in enumerate(cases):
             case_id = str(case.get("id") or case.get("case_id") or f"case-{index + 1}")
             expected = case.get("expected") if isinstance(case.get("expected"), dict) else {}
@@ -1043,21 +1302,6 @@ def run_retrieval_preflight(
             )
         snapshot_after = _tree_fingerprint(snapshot_root)
         snapshot_changes = _fingerprint_changes(snapshot_before, snapshot_after)
-        receipt_ids = [
-            str(item["retrieval_check"].get("retrieval_id") or "")
-            for item in results
-            if item["observation"].get("exit_code") == 0
-            and not item["observation"].get("parse_error")
-        ]
-        if (
-            RETRIEVAL_RECEIPTS_RELATIVE_PATH in snapshot_changes
-            and _expected_receipt_append_is_valid(
-                snapshot_root,
-                before_rows=receipt_rows_before,
-                retrieval_ids=receipt_ids,
-            )
-        ):
-            snapshot_changes.remove(RETRIEVAL_RECEIPTS_RELATIVE_PATH)
         snapshot_identifier = _snapshot_id(snapshot_before)
 
     production_after = _tree_fingerprint(production_root)
@@ -1379,6 +1623,11 @@ def _strict_failures(report: dict[str, Any]) -> list[str]:
         failures.append("gold case action/owner accuracy is below 100%")
     if case_metrics.get("coordination_accuracy") not in {None, 1.0}:
         failures.append("gold case route/handoff accuracy is below 100%")
+    if (
+        case_metrics.get("topic_preflight_case_total")
+        and case_metrics.get("topic_preflight_accuracy") != 1.0
+    ):
+        failures.append("gold case topic preflight accuracy is below 100%")
     if case_metrics.get("query_anchor_failure_count"):
         failures.append("candidate retrieval query missed required anchors")
     retrieval = report.get("retrieval_metrics") or {}
@@ -1409,7 +1658,8 @@ def _print_text(report: dict[str, Any]) -> None:
         "KB_POLICY_SIMULATOR "
         f"cases={cases['case_total']} phase_accuracy={cases['phase_accuracy']} "
         f"retrieve_accuracy={cases['retrieve_accuracy']} "
-        f"coordination_accuracy={cases['coordination_accuracy']}"
+        f"coordination_accuracy={cases['coordination_accuracy']} "
+        f"topic_preflight_accuracy={cases.get('topic_preflight_accuracy')}"
     )
     print(
         f"- false_positive_count: {cases['false_positive_count']}\n"
@@ -1447,7 +1697,18 @@ def _print_text(report: dict[str, Any]) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     script_root = Path(__file__).resolve().parent
-    eval_dir = script_root.parent / "references" / "evals"
+    repository_eval_dir = (
+        script_root.parent.parent.parent
+        / "docs"
+        / "req"
+        / "001-personal-kb-taxonomy"
+        / "evals"
+    )
+    bundled_eval_dir = script_root.parent / "references" / "evals"
+    required_eval_files = ("runtime-preflight-cases.json", "runtime-preflight-gold.json")
+    eval_dir = repository_eval_dir
+    if not all((repository_eval_dir / name).is_file() for name in required_eval_files):
+        eval_dir = bundled_eval_dir
     default_cases = eval_dir / "runtime-preflight-cases.json"
     default_gold = eval_dir / "runtime-preflight-gold.json"
     parser = argparse.ArgumentParser(
@@ -1465,7 +1726,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="With --strict, explicitly skip retrieval checks and gate only routing policy",
     )
-    parser.add_argument("--kb-root", default=str(personal_kb_root_dir()), help="Production KB root")
+    parser.add_argument(
+        "--kb-root",
+        default="",
+        help="Production KB root; defaults to configured storage.root only when RAG checks run",
+    )
     parser.add_argument("--rag-script", default=str(script_root / "kb_rag_context.py"))
     parser.add_argument(
         "--allow-unsafe-rag-script",
@@ -1551,7 +1816,13 @@ def main(argv: list[str] | None = None) -> int:
     }
 
     if args.run_rag:
-        production_root = Path(args.kb_root).expanduser().resolve()
+        kb_root_value = args.kb_root.strip()
+        if not kb_root_value:
+            try:
+                kb_root_value = str(personal_kb_root_dir())
+            except ValueError as exc:
+                parser.error(str(exc))
+        production_root = Path(kb_root_value).expanduser().resolve()
         rag_script = Path(args.rag_script).expanduser().resolve()
         if production_root in {Path("/"), Path.home().resolve()}:
             parser.error("--kb-root cannot be the filesystem root or home directory")

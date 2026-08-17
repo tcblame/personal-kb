@@ -13,13 +13,19 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-if sys.platform == "win32":
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
-    if hasattr(sys.stderr, "reconfigure"):
-        sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+if sys.platform == "win32" and hasattr(sys.stdout, "buffer"):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace", line_buffering=True)
 
-from kb_lib import append_jsonl, now_iso, personal_kb_root_dir, read_jsonl
+from kb_lib import (
+    append_jsonl,
+    bucket_lock,
+    manifests_dir as configured_manifests_dir,
+    now_iso,
+    read_jsonl,
+    retained_files_dir,
+)
+from kb_sensitive_scan import sensitive_findings
 
 
 WINDOWS_RESERVED_DEVICE_NAMES = {
@@ -39,19 +45,29 @@ VALID_CATEGORIES = {
     "requirements",
     "configs",
     "attachments",
+    "database",
+    "resources",
+    "datasets",
 }
 
+VALID_REFERENCE_KINDS = {"credential", "secret-manager", "external-resource"}
 
+HIGH_CONFIDENCE_SECRET_PATTERNS = (
+    ("github_token", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{30,})\b")),
+    ("openai_key", re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b")),
+    ("aws_access_key", re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b")),
+    ("putty_private_key", re.compile(r"^PuTTY-User-Key-File-", re.M)),
+)
 def _write_json(obj: dict[str, Any]) -> None:
     sys.stdout.write(json.dumps(obj, ensure_ascii=False, indent=2) + "\n")
 
 
 def retained_files_base_dir() -> Path:
-    return personal_kb_root_dir() / "retained-files"
+    return retained_files_dir()
 
 
 def manifests_dir() -> Path:
-    return personal_kb_root_dir() / "manifests"
+    return configured_manifests_dir()
 
 
 def global_manifest_path() -> Path:
@@ -74,6 +90,30 @@ def _safe_dir_name(value: str, *, fallback: str) -> str:
 
 def _safe_file_name(name: str) -> str:
     return _safe_dir_name(name, fallback="retained-file")
+
+
+def _harden_local_file(path: Path) -> None:
+    """Apply best-effort owner-only permissions without claiming encryption."""
+    if os.name == "nt":
+        return
+    try:
+        os.chmod(path, 0o600)
+        resolved_path = path.resolve(strict=False)
+        for base in (retained_files_base_dir(), manifests_dir()):
+            resolved_base = base.resolve(strict=False)
+            try:
+                resolved_path.relative_to(resolved_base)
+            except ValueError:
+                continue
+            cursor = resolved_path.parent
+            while True:
+                os.chmod(cursor, 0o700)
+                if cursor == resolved_base:
+                    break
+                cursor = cursor.parent
+            break
+    except OSError:
+        pass
 
 
 def _case_year(case_id: str) -> str:
@@ -153,9 +193,13 @@ def _write_case_manifest(project_key: str, case_id: str, manifest: dict[str, Any
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
             json.dump(manifest, f, ensure_ascii=False, indent=2)
             f.write("\n")
+            f.flush()
+            if sys.platform != "win32":
+                os.fchmod(f.fileno(), 0o600)
         if sys.platform == "win32" and path.exists():
             path.unlink()
         shutil.move(str(temp_path), str(path))
+        _harden_local_file(path)
     except Exception:
         if temp_path.exists():
             temp_path.unlink()
@@ -197,6 +241,42 @@ def _find_asset(asset_id: str) -> dict[str, Any] | None:
     return None
 
 
+def _find_duplicate_by_hash(sha256: str, size_bytes: int) -> dict[str, Any] | None:
+    """Find an existing local evidence object that can be safely reused."""
+    for row in read_jsonl(global_manifest_path()):
+        if str(row.get("sha256", "")) != sha256:
+            continue
+        try:
+            if int(row.get("size_bytes", -1)) != size_bytes:
+                continue
+        except (TypeError, ValueError):
+            continue
+        stored_path = str(row.get("stored_path", ""))
+        if stored_path and Path(stored_path).is_file():
+            return row
+    return None
+
+
+def _is_same_path(left: Path, right: Path) -> bool:
+    try:
+        return left.resolve(strict=False) == right.resolve(strict=False)
+    except OSError:
+        return str(left) == str(right)
+
+
+def _safe_reference_locator(value: str) -> bool:
+    """Reject pasted secret-shaped values while allowing a vault/item locator."""
+    if not value or "\n" in value or "\r" in value:
+        return False
+    lowered = value.lower()
+    secret_markers = ("password=", "passwd=", "token=", "secret=", "-----begin", "bearer ")
+    if any(marker in lowered for marker in secret_markers):
+        return False
+    if sensitive_findings(value):
+        return False
+    return not any(pattern.search(value) for _label, pattern in HIGH_CONFIDENCE_SECRET_PATTERNS)
+
+
 def _copy_or_move(source: Path, target: Path, mode: str) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     if mode == "copy":
@@ -227,44 +307,65 @@ def retain_file(args: argparse.Namespace) -> int:
 
     source_hash = _file_sha256(source)
     size_bytes = source.stat().st_size
-    target = _dedupe_target(_category_dir(project_key, case_id, category) / _safe_file_name(source.name))
     mode = args.mode
+    target = _dedupe_target(_category_dir(project_key, case_id, category) / _safe_file_name(source.name))
+    created_target = False
+    storage_action = "copied" if mode == "copy" else "moved"
+    duplicate_source = ""
 
+    # The global manifest is the small coordination point for content dedupe.
+    # A second case gets a new asset relation, but the bytes are stored once.
     try:
-        _copy_or_move(source, target, mode)
-        stored_hash = _file_sha256(target)
-    except OSError as e:
+        with bucket_lock(global_manifest_path()):
+            existing = None if getattr(args, "no_dedupe", False) else _find_duplicate_by_hash(source_hash, size_bytes)
+            if existing:
+                existing_path = Path(str(existing.get("stored_path", "")))
+                target = existing_path
+                storage_action = "reused"
+                duplicate_source = str(existing.get("asset_id", ""))
+                if mode == "move" and not _is_same_path(source, existing_path):
+                    source.unlink()
+            else:
+                _copy_or_move(source, target, mode)
+                created_target = True
+                stored_hash = _file_sha256(target)
+                if stored_hash != source_hash:
+                    raise OSError("sha256 mismatch after copy/move")
+                _harden_local_file(target)
+
+            asset = {
+                "asset_id": _next_asset_id(case_id),
+                "project_key": project_key,
+                "case_id": case_id,
+                "category": category,
+                "mode": mode,
+                "storage_action": storage_action,
+                "deduplicated_from_asset": duplicate_source,
+                "origin_path": str(source),
+                "stored_path": str(target),
+                "sha256": source_hash,
+                "size_bytes": size_bytes,
+                "created_at": now_iso(),
+                "reason": args.reason.strip(),
+                "related_entry": args.related_entry.strip(),
+                "local_only": True,
+                "storage_protection": "filesystem-permissions-only",
+                "status": "active",
+            }
+
+            manifest = _load_case_manifest(project_key, case_id)
+            manifest["assets"].append(asset)
+            _write_case_manifest(project_key, case_id, manifest)
+            append_jsonl(global_manifest_path(), asset, lock_held=True)
+            _harden_local_file(global_manifest_path())
+    except (OSError, ValueError) as e:
+        if created_target:
+            try:
+                target.unlink(missing_ok=True)
+            except OSError:
+                pass
         sys.stderr.write(f"Failed to retain file: {e}\n")
         return 2
-
-    if stored_hash != source_hash:
-        try:
-            target.unlink(missing_ok=True)
-        except OSError:
-            pass
-        sys.stderr.write("Failed to retain file: sha256 mismatch after copy/move\n")
-        return 2
-
-    asset = {
-        "asset_id": _next_asset_id(case_id),
-        "project_key": project_key,
-        "case_id": case_id,
-        "category": category,
-        "mode": mode,
-        "origin_path": str(source),
-        "stored_path": str(target),
-        "sha256": stored_hash,
-        "size_bytes": size_bytes,
-        "created_at": now_iso(),
-        "reason": args.reason.strip(),
-        "related_entry": args.related_entry.strip(),
-        "status": "active",
-    }
-
-    manifest = _load_case_manifest(project_key, case_id)
-    manifest["assets"].append(asset)
-    _write_case_manifest(project_key, case_id, manifest)
-    append_jsonl(global_manifest_path(), asset)
 
     summary = {
         "status": "ok",
@@ -274,12 +375,71 @@ def retain_file(args: argparse.Namespace) -> int:
         "case_id": case_id,
         "category": category,
         "mode": mode,
+        "storage_action": storage_action,
+        "deduplicated_from_asset": duplicate_source,
         "archive_path": str(case_archive_dir(project_key, case_id)),
         "stored_path": str(target),
-        "sha256": stored_hash,
+        "sha256": source_hash,
         "size_bytes": size_bytes,
+        "local_only": True,
+        "storage_protection": "filesystem-permissions-only",
     }
     _write_json(summary)
+    return 0
+
+
+def retain_reference(args: argparse.Namespace) -> int:
+    """Record a resource locator; use retain when the actual bytes must be archived."""
+    project_key = args.project_key.strip()
+    case_id = args.case_id.strip()
+    locator = args.locator.strip()
+    reference_kind = args.reference_kind.strip()
+    if not project_key or not case_id:
+        sys.stderr.write("--project-key and --case-id are required\n")
+        return 2
+    if reference_kind not in VALID_REFERENCE_KINDS:
+        sys.stderr.write(f"Invalid reference kind: {reference_kind}\n")
+        return 2
+    if not _safe_reference_locator(locator):
+        sys.stderr.write("Reference locator looks like a pasted secret; provide only a vault/item reference.\n")
+        return 4
+
+    with bucket_lock(global_manifest_path()):
+        asset = {
+            "asset_id": _next_asset_id(case_id),
+            "project_key": project_key,
+            "case_id": case_id,
+            "category": "references",
+            "mode": "reference",
+            "storage_action": "external_reference",
+            "reference_kind": reference_kind,
+            "locator": locator,
+            "origin_path": "",
+            "stored_path": "",
+            "sha256": "",
+            "size_bytes": 0,
+            "created_at": now_iso(),
+            "reason": args.reason.strip(),
+            "related_entry": args.related_entry.strip(),
+            "local_only": True,
+            "status": "external_reference",
+        }
+        manifest = _load_case_manifest(project_key, case_id)
+        manifest["assets"].append(asset)
+        _write_case_manifest(project_key, case_id, manifest)
+        append_jsonl(global_manifest_path(), asset, lock_held=True)
+        _harden_local_file(global_manifest_path())
+
+    _write_json({
+        "status": "ok",
+        "action": "reference",
+        "asset_id": asset["asset_id"],
+        "project_key": project_key,
+        "case_id": case_id,
+        "reference_kind": reference_kind,
+        "locator": locator,
+        "archive_path": str(case_archive_dir(project_key, case_id)),
+    })
     return 0
 
 
@@ -329,6 +489,10 @@ def _verify_asset(asset: dict[str, Any]) -> dict[str, Any]:
         "ok": False,
         "error": "",
     }
+    if asset.get("storage_action") == "external_reference" or asset.get("mode") == "reference":
+        result["ok"] = bool(str(asset.get("locator", "")).strip())
+        result["error"] = "external_reference" if result["ok"] else "reference_missing"
+        return result
     stored_path = Path(str(asset.get("stored_path", "")))
     if not stored_path.exists():
         result["error"] = "file_missing"
@@ -369,17 +533,28 @@ def verify_case(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(description="Retain original evidence files for personal-kb.")
+    parser = argparse.ArgumentParser(
+        description="Retain original evidence files verbatim in the local plaintext personal-kb archive."
+    )
     sub = parser.add_subparsers(dest="action")
 
-    retain = sub.add_parser("retain", help="Copy or move one file into retained-files.")
+    retain = sub.add_parser("retain", help="Copy or move one file verbatim into local retained-files.")
     retain.add_argument("--path", required=True, help="Source file path.")
     retain.add_argument("--project-key", required=True, help="Project key, e.g. study.")
     retain.add_argument("--case-id", required=True, help="Stable case id.")
     retain.add_argument("--category", required=True, choices=sorted(VALID_CATEGORIES))
     retain.add_argument("--mode", choices=["copy", "move"], default="copy")
+    retain.add_argument("--no-dedupe", action="store_true", help="Keep a separate physical copy even when SHA-256 matches.")
     retain.add_argument("--reason", default="")
     retain.add_argument("--related-entry", default="")
+
+    reference = sub.add_parser("reference", help="Record an external credential/resource locator without copying its value.")
+    reference.add_argument("--project-key", required=True)
+    reference.add_argument("--case-id", required=True)
+    reference.add_argument("--reference-kind", choices=sorted(VALID_REFERENCE_KINDS), required=True)
+    reference.add_argument("--locator", required=True, help="Vault/item or external resource locator; use retain for content bytes.")
+    reference.add_argument("--reason", default="")
+    reference.add_argument("--related-entry", default="")
 
     list_cmd = sub.add_parser("list", help="List retained assets for a case.")
     list_cmd.add_argument("--project-key", required=True)
@@ -403,6 +578,8 @@ def main(argv: list[str]) -> int:
 
     if args.action == "retain":
         return retain_file(args)
+    if args.action == "reference":
+        return retain_reference(args)
     if args.action == "list":
         return list_case(args)
     if args.action == "show":

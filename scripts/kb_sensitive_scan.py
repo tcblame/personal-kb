@@ -53,7 +53,7 @@ PATTERNS: tuple[PatternSpec, ...] = (
     (
         "credential_assignment",
         re.compile(
-            r"(?i)\b(?P<key>password|passwd|pwd|client[_-]?secret|access[_-]?token|"
+            r"(?i)(?<![A-Za-z0-9])(?P<key>password|passwd|pwd|client[_-]?secret|access[_-]?token|"
             r"refresh[_-]?token|api[_-]?key|secret[_-]?key)\b"
             r"(?P<sep>\s*[:=]\s*)(?P<quote>[\"']?)(?P<value>[^\s\"'&,;}\]]{6,})(?P=quote)"
         ),

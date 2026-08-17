@@ -13,15 +13,14 @@ from typing import Any
 import kb_adoption
 
 # Windows UTF-8 输出修复
-if sys.platform == 'win32':
-    if hasattr(sys.stdout, 'reconfigure'):
-        sys.stdout.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)
-    if hasattr(sys.stderr, 'reconfigure'):
-        sys.stderr.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)
+if sys.platform == 'win32' and hasattr(sys.stdout, 'buffer'):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace', line_buffering=True)
 
 from kb_kinds import VALID_KINDS, parse_kind_filter, parse_legacy_type_filter
 from kb_lib import (
     JsonlSafetyError,
+    cache_dir_for_records,
     ensure_jsonl_safe,
     expand_query,
     expand_query_variants,
@@ -665,7 +664,7 @@ def _track_search_in_index(query: str, *, show_candidates: bool = False) -> None
         if not show_candidates:
             return
 
-        agg_dir = base.parent / "_meta" / "_aggregations"
+        agg_dir = cache_dir_for_records(base) / "_aggregations"
         for kw in query_keywords:
             info = index.get_keyword_info(kw)
             if not info:
@@ -976,7 +975,7 @@ def _main(argv: list[str]) -> int:
 
     # P0: 默认搜索只读。日志也需要显式开启，避免搜索本身产生写入副作用。
     if log_search:
-        log_dir = kb_base_dir().parent / "runtime" / "logs"
+        log_dir = Path.home() / ".codex" / "personal-kb-logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         log_file = log_dir / "kb_search.log"
         log_entry = {

@@ -312,9 +312,15 @@ def get_bucket_aggregator_path(kb_base_dir: Path) -> Path:
     获取聚合视图目录路径
 
     Args:
-        kb_base_dir: KB 基础目录（本项目默认为 <skill>/storage/repos）
+        kb_base_dir: KB 基础目录（通常是 ~/.codex/personal-kb/repos）
 
     Returns:
         聚合视图目录路径
     """
-    return kb_base_dir.parent / "_meta" / "_aggregations"
+    try:
+        from kb_lib import cache_dir_for_records
+
+        cache_base = cache_dir_for_records(kb_base_dir)
+    except (ImportError, ValueError):
+        cache_base = kb_base_dir.parent / "_meta"
+    return cache_base / "_aggregations"

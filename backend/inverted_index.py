@@ -85,7 +85,7 @@ class InvertedIndex:
         Args:
             entry_id: 条目 ID
             keywords: 关键词列表（tags + aliases + trigger_terms）
-            bucket: 桶路径（如 "project-alpha/main"）
+            bucket: 桶路径（如 "example-project-a/example-branch-a"）
         """
         if not self._loaded:
             self.load()
@@ -325,9 +325,15 @@ def get_inverted_index_path(kb_base_dir: Path) -> Path:
     获取倒排索引文件路径
 
     Args:
-        kb_base_dir: KB 基础目录（本项目默认为 <skill>/storage/repos）
+        kb_base_dir: KB 基础目录（通常是 ~/.codex/personal-kb/repos）
 
     Returns:
         索引文件路径
     """
-    return kb_base_dir.parent / "_meta" / "_index" / "keywords.json"
+    try:
+        from kb_lib import cache_dir_for_records
+
+        cache_base = cache_dir_for_records(kb_base_dir)
+    except (ImportError, ValueError):
+        cache_base = kb_base_dir.parent / "_meta"
+    return cache_base / "_index" / "keywords.json"

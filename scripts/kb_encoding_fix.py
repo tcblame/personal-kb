@@ -11,16 +11,25 @@ import sys
 import io
 from pathlib import Path
 
-from kb_lib import kb_base_dir
-
 
 def force_utf8_output():
     """强制 stdout/stderr 使用 UTF-8 编码（Windows 兼容）"""
     if sys.platform == 'win32':
-        if hasattr(sys.stdout, 'reconfigure'):
-            sys.stdout.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)
-        if hasattr(sys.stderr, 'reconfigure'):
-            sys.stderr.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)
+        # 重新配置 stdout 和 stderr 为 UTF-8
+        if hasattr(sys.stdout, 'buffer'):
+            sys.stdout = io.TextIOWrapper(
+                sys.stdout.buffer,
+                encoding='utf-8',
+                errors='replace',
+                line_buffering=True
+            )
+        if hasattr(sys.stderr, 'buffer'):
+            sys.stderr = io.TextIOWrapper(
+                sys.stderr.buffer,
+                encoding='utf-8',
+                errors='replace',
+                line_buffering=True
+            )
 
 
 def check_log_encoding(log_path: Path) -> dict:
@@ -56,7 +65,7 @@ def check_log_encoding(log_path: Path) -> dict:
 def main():
     force_utf8_output()
 
-    log_dir = kb_base_dir().parent / 'runtime' / 'logs'
+    log_dir = Path.home() / '.codex' / 'personal-kb-logs'
 
     print('=== Personal-KB 编码检查 ===\n')
 

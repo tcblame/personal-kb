@@ -13,14 +13,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-if sys.platform == "win32":
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
-    if hasattr(sys.stderr, "reconfigure"):
-        sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+if sys.platform == "win32" and hasattr(sys.stdout, "buffer"):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace", line_buffering=True)
 
-from kb_codex_tool_calls import custom_exec_commands, custom_exec_is_parseable
-from kb_lib import kb_base_dir, now_iso
+from kb_lib import kb_base_dir, now_iso, runtime_file
 
 
 KB_SCRIPT_PATTERNS = {
@@ -29,6 +26,14 @@ KB_SCRIPT_PATTERNS = {
     "kb_closeout": "kb_closeout.py",
     "kb_add": "kb_add.py",
     "kb_update": "kb_update.py",
+}
+
+KB_WRAPPER_COMMANDS = {
+    "retrieve": "kb_rag_context",
+    "search": "kb_search",
+    "closeout": "kb_closeout",
+    "remember": "kb_add",
+    "update": "kb_update",
 }
 
 CURRENT_WORKFLOW_CUTOFF = "2026-07-03"
@@ -61,12 +66,7 @@ RUNTIME_AUDIT_RE = re.compile(
     r"(?:运行|runtime|会话|session|效果|质量|审计|telemetry).{0,24}(?:personal-kb|\bKB\b|知识库)",
     re.I,
 )
-GENERIC_SKILL_MAINTENANCE_RE = re.compile(
-    r"(?:安装|整理|合并|更新|配置).{0,24}\bskills?\b|"
-    r"\bskills?\b.{0,24}(?:安装|整理|合并|更新|配置)|"
-    r"\bskills?\s+(?:installation|setup|maintenance|update|merge)\b",
-    re.I,
-)
+GENERIC_SKILL_INSTALL_RE = re.compile(r"(面试|简历).{0,20}skill|skill.{0,20}(面试|简历)|interview-coach|resume.*skill", re.I)
 CONTINUITY_RE = re.compile(r"继续|上次|之前|历史|已有|已确认|当前材料|现有材料", re.I)
 SUBAGENT_KB_TASK_RE = re.compile(
     r"KB\s*scout|kb\s*scout|"
@@ -83,35 +83,45 @@ SUBAGENT_NON_KB_TASK_RE = re.compile(
     r"(?:KB|personal-kb).*?未授权",
     re.I,
 )
-EXIT_RE = re.compile(r"(?:Process exited with code\s+|Exit code:\s*)(-?\d+)")
+EXIT_RE = re.compile(r"Process exited with code\s+(-?\d+)")
 RAG_TEXT_HITS_RE = re.compile(r"\bhits=(\d+)(?=\s|$)")
 RAG_TEXT_RETRIEVAL_ID_RE = re.compile(r'retrieval_id="([A-Za-z0-9._:-]+)"')
 RETRIEVAL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
-PYTHON_EXECUTABLE_RE = re.compile(r"(?:python(?:\d+(?:\.\d+)?)?|py)(?:\.exe)?", re.I)
+PYTHON_EXECUTABLE_RE = re.compile(r"python(?:\d+(?:\.\d+)?)?|py", re.I)
+CUSTOM_EXEC_CMD_RE = re.compile(
+    r"(?:[\"']cmd[\"']|\bcmd)\s*:\s*(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)",
+    re.S,
+)
 ROLLOUT_UUID_RE = re.compile(r"(?<![0-9a-f])[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}(?![0-9a-f])", re.I)
 ADOPTION_EFFECTS = ("locate", "decide", "fix", "write")
 ADOPTION_EFFECT_PRECEDENCE = ("write", "fix", "decide", "locate")
-PARSER_VERSION = "codex-shell-v9"
+CONTEXT_PREFIXES = (
+    "# AGENTS.md instructions",
+    "<INSTRUCTIONS>",
+    "<environment_context>",
+    "<permissions instructions>",
+    "<collaboration_mode>",
+    "<skills_instructions>",
+    "<subagent_notification>",
+    "<turn_aborted>",
+)
+PARSER_VERSION = "codex-shell-v8"
 
 
 def log_path(base_dir: Path | None = None) -> Path:
-    base = base_dir if base_dir is not None else kb_base_dir()
-    return base / "_meta" / "codex_kb_effectiveness_log.jsonl"
+    return runtime_file("codex_kb_effectiveness_log.jsonl", base_dir=base_dir)
 
 
 def summary_path(base_dir: Path | None = None) -> Path:
-    base = base_dir if base_dir is not None else kb_base_dir()
-    return base / "_meta" / "codex_kb_effectiveness_summary.json"
+    return runtime_file("codex_kb_effectiveness_summary.json", base_dir=base_dir)
 
 
 def legacy_log_path(base_dir: Path | None = None) -> Path:
-    base = base_dir if base_dir is not None else kb_base_dir()
-    return base / "_meta" / "codex_kb_effectiveness_legacy_log.jsonl"
+    return runtime_file("codex_kb_effectiveness_legacy_log.jsonl", base_dir=base_dir)
 
 
 def state_path(base_dir: Path | None = None) -> Path:
-    base = base_dir if base_dir is not None else kb_base_dir()
-    return base / "_meta" / "codex_kb_effectiveness_state.json"
+    return runtime_file("codex_kb_effectiveness_state.json", base_dir=base_dir)
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -442,6 +452,17 @@ def _output_text(value: Any) -> str:
     return ""
 
 
+def _user_response_text(content: Any) -> str:
+    parts: list[str] = []
+    for item in _as_list(content):
+        text = _output_text(item)
+        if text.lstrip().startswith(CONTEXT_PREFIXES):
+            continue
+        if text.strip():
+            parts.append(text)
+    return "\n".join(parts)
+
+
 def _has_subagent_no_kb_guard(text: str) -> bool:
     normalized = " ".join(str(text or "").lower().split())
     return (
@@ -524,8 +545,38 @@ def _closeout_payload_from_output(output: str) -> dict[str, Any]:
     return payload
 
 
+def _decode_js_string(literal: str) -> str:
+    if not literal:
+        return ""
+    if literal.startswith('"'):
+        try:
+            value = json.loads(literal)
+            return str(value) if isinstance(value, str) else ""
+        except json.JSONDecodeError:
+            return ""
+    if literal.startswith("'"):
+        try:
+            value = ast.literal_eval(literal)
+            return str(value) if isinstance(value, str) else ""
+        except (SyntaxError, ValueError):
+            return ""
+    if literal.startswith("`") and literal.endswith("`"):
+        value = literal[1:-1]
+        if "${" in value:
+            return ""
+        return value.replace(r"\`", "`").replace(r"\n", "\n").replace(r"\r", "\r").replace(r"\t", "\t")
+    return ""
+
+
 def _custom_exec_commands(source: str) -> list[str]:
-    return custom_exec_commands(source)
+    if "tools.exec_command" not in (source or ""):
+        return []
+    commands: list[str] = []
+    for match in CUSTOM_EXEC_CMD_RE.finditer(source):
+        command = _decode_js_string(match.group(1))
+        if command:
+            commands.append(command)
+    return commands
 
 
 def _parse_hit_count_from_output(output: str) -> int | None:
@@ -630,10 +681,22 @@ def _nested_python_invocation(command: str, script_name: str) -> bool:
     return any(re.search(pattern, command, re.I | re.S) for pattern in patterns)
 
 
+def _wrapper_invocation(tokens: list[str]) -> tuple[str, int] | None:
+    wrapper_index = _direct_script_index(tokens, "kb.py")
+    if wrapper_index is None or wrapper_index + 1 >= len(tokens):
+        return None
+    command_index = wrapper_index + 1
+    script_key = KB_WRAPPER_COMMANDS.get(tokens[command_index])
+    return (script_key, command_index) if script_key else None
+
+
 def _detect_kb_script(command: str, tokens: list[str]) -> tuple[str, str]:
     for key, script_name in KB_SCRIPT_PATTERNS.items():
         if _direct_script_index(tokens, script_name) is not None:
             return key, "direct"
+    wrapped = _wrapper_invocation(tokens)
+    if wrapped:
+        return wrapped[0], "wrapper"
     for key, script_name in KB_SCRIPT_PATTERNS.items():
         if script_name in command and _nested_python_invocation(command, script_name):
             return key, "nested_python"
@@ -641,7 +704,17 @@ def _detect_kb_script(command: str, tokens: list[str]) -> tuple[str, str]:
 
 
 def _script_index(tokens: list[str], script_name: str) -> int | None:
-    return _direct_script_index(tokens, script_name)
+    direct_index = _direct_script_index(tokens, script_name)
+    if direct_index is not None:
+        return direct_index
+    expected_key = next(
+        (key for key, value in KB_SCRIPT_PATTERNS.items() if value == script_name),
+        "",
+    )
+    wrapped = _wrapper_invocation(tokens)
+    if wrapped and wrapped[0] == expected_key:
+        return wrapped[1]
+    return None
 
 
 def _is_help_invocation(tokens: list[str], script_name: str) -> bool:
@@ -892,7 +965,7 @@ def _call_commands(payload: dict[str, Any]) -> tuple[list[str], str]:
     payload_type = str(payload.get("type") or "")
     if payload_type == "function_call":
         arguments = _json_loads(str(payload.get("arguments") or "{}"))
-        command = str(arguments.get("cmd") or arguments.get("command") or "")
+        command = str(arguments.get("cmd") or "")
         return ([command] if command else []), "function_call"
     if payload_type == "custom_tool_call" and payload.get("name") == "exec":
         return _custom_exec_commands(str(payload.get("input") or "")), "custom_tool_call_exec"
@@ -1115,7 +1188,10 @@ def _parse_session(path: Path) -> dict[str, Any]:
                 current_turn_id = f"user-turn-{synthetic_turn}"
             last_user_turn = current_turn_id
         elif row_type == "response_item" and payload.get("type") == "message" and payload.get("role") in {"user", "developer"}:
-            instruction_text = _output_text(payload.get("content"))
+            if payload.get("role") == "user":
+                instruction_text = _user_response_text(payload.get("content"))
+            else:
+                instruction_text = _output_text(payload.get("content"))
             if instruction_text.strip():
                 instruction_messages.append(instruction_text)
             if _has_subagent_no_kb_guard(instruction_text):
@@ -1126,17 +1202,15 @@ def _parse_session(path: Path) -> dict[str, Any]:
                 output_by_call_id[call_id] = _output_text(payload.get("output"))
         elif row_type == "response_item" and payload.get("type") == "function_call":
             arguments = _json_loads(str(payload.get("arguments") or "{}"))
-            if payload.get("name") in {"exec", "exec_command", "shell_command"} or any(
-                key in arguments for key in ("cmd", "command")
-            ):
+            if payload.get("name") in {"exec", "exec_command"} or "cmd" in arguments:
                 calls.append({"row": row, "turn_id": _turn_id(payload, current_turn_id)})
                 source_format_counts["function_call"] += 1
-                if not str(arguments.get("cmd") or arguments.get("command") or ""):
+                if not str(arguments.get("cmd") or ""):
                     unparsed_exec_count += 1
         elif row_type == "response_item" and payload.get("type") == "custom_tool_call" and payload.get("name") == "exec":
             calls.append({"row": row, "turn_id": _turn_id(payload, current_turn_id)})
             source_format_counts["custom_tool_call_exec"] += 1
-            if not custom_exec_is_parseable(str(payload.get("input") or "")):
+            if not _custom_exec_commands(str(payload.get("input") or "")):
                 unparsed_exec_count += 1
 
     meta, rollout_id, session_meta_selection = _select_session_meta(path, metas)
@@ -1275,7 +1349,7 @@ def _parse_session(path: Path) -> dict[str, Any]:
     runtime_audit = bool(RUNTIME_AUDIT_RE.search(user_text))
     explicit_kb = bool(EXPLICIT_KB_RE.search(user_text)) and not runtime_audit
     memory_needed = bool(MEMORY_NEEDED_RE.search(user_text))
-    generic_skill_install = bool(GENERIC_SKILL_MAINTENANCE_RE.search(user_text)) and not explicit_kb
+    generic_skill_install = bool(GENERIC_SKILL_INSTALL_RE.search(user_text)) and not explicit_kb
     if generic_skill_install and not CONTINUITY_RE.search(user_text):
         memory_needed = False
     instruction_non_kb_task = bool(SUBAGENT_NON_KB_TASK_RE.search(instruction_text))
@@ -1336,7 +1410,7 @@ def _parse_session(path: Path) -> dict[str, Any]:
     if memory_needed:
         reasons.append("user task looks history-dependent")
     if generic_skill_install:
-        reasons.append("generic skill maintenance does not imply personal-kb usage")
+        reasons.append("generic interview/resume skill work does not imply personal-kb usage")
     if forbid_kb:
         reasons.append("user/task forbids KB usage")
     if forbid_write_kb:
@@ -1728,6 +1802,9 @@ def _summary_from_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     adoption_effect_counts: collections.Counter[str] = collections.Counter()
     all_adoption_effect_counts: collections.Counter[str] = collections.Counter()
     subagent_adoption_effect_counts: collections.Counter[str] = collections.Counter()
+    classified_adoption_count = 0
+    all_classified_adoption_count = 0
+    subagent_classified_adoption_count = 0
     legacy_used_count = 0
     all_legacy_used_count = 0
     subagent_legacy_used_count = 0
@@ -1766,6 +1843,10 @@ def _summary_from_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
             all_kb_used += 1
         row_adopted_count = _coerce_int(row.get("adopted_count"), 0)
         row_effect_counts = row.get("adoption_effect_counts") if isinstance(row.get("adoption_effect_counts"), dict) else {}
+        row_classified_adoption_count = sum(
+            _coerce_int(row_effect_counts.get(effect), 0)
+            for effect in ADOPTION_EFFECTS
+        )
         row_legacy_used_count = _coerce_int(row.get("legacy_used_count"), 0)
         requested_adoption_count += _coerce_int(row.get("requested_adoption_count"), 0)
         if row.get("adoption_unconfirmed"):
@@ -1774,6 +1855,7 @@ def _summary_from_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
             all_adopted_sessions += 1
         all_adopted_count += row_adopted_count
         all_legacy_used_count += row_legacy_used_count
+        all_classified_adoption_count += row_classified_adoption_count
         for effect in ADOPTION_EFFECTS:
             all_adoption_effect_counts[effect] += _coerce_int(row_effect_counts.get(effect), 0)
         is_subagent = bool(row.get("is_subagent"))
@@ -1799,6 +1881,7 @@ def _summary_from_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
             if row.get("subagent_missing_no_kb_guard"):
                 subagent_missing_no_kb_guard += 1
             subagent_legacy_used_count += row_legacy_used_count
+            subagent_classified_adoption_count += row_classified_adoption_count
             for effect in ADOPTION_EFFECTS:
                 subagent_adoption_effect_counts[effect] += _coerce_int(row_effect_counts.get(effect), 0)
             continue
@@ -1826,6 +1909,7 @@ def _summary_from_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
             adopted_sessions += 1
         adopted_count += row_adopted_count
         legacy_used_count += row_legacy_used_count
+        classified_adoption_count += row_classified_adoption_count
         for effect in ADOPTION_EFFECTS:
             adoption_effect_counts[effect] += _coerce_int(row_effect_counts.get(effect), 0)
         if verdict == "needed_but_not_used":
@@ -1847,6 +1931,9 @@ def _summary_from_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "main_effective_sessions": effective,
         "main_adopted_sessions": adopted_sessions,
         "main_adopted_count": adopted_count,
+        "main_confirmed_adoption_count": adopted_count,
+        "main_classified_adoption_count": classified_adoption_count,
+        "main_legacy_confirmed_adoption_count": legacy_used_count,
         "main_adoption_effects": {effect: adoption_effect_counts[effect] for effect in ADOPTION_EFFECTS},
         "main_legacy_used_count": legacy_used_count,
         "main_missed_sessions": missed,
@@ -1861,11 +1948,17 @@ def _summary_from_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "effective_sessions": effective,
         "adopted_sessions": adopted_sessions,
         "adopted_count": adopted_count,
+        "confirmed_adoption_count": adopted_count,
+        "classified_adoption_count": classified_adoption_count,
+        "legacy_confirmed_adoption_count": legacy_used_count,
         "adoption_effects": {effect: adoption_effect_counts[effect] for effect in ADOPTION_EFFECTS},
         "adoption_effect_counts": {effect: adoption_effect_counts[effect] for effect in ADOPTION_EFFECTS},
         "legacy_used_count": legacy_used_count,
         "all_adopted_sessions": all_adopted_sessions,
         "all_adopted_count": all_adopted_count,
+        "all_confirmed_adoption_count": all_adopted_count,
+        "all_classified_adoption_count": all_classified_adoption_count,
+        "all_legacy_confirmed_adoption_count": all_legacy_used_count,
         "all_adoption_effects": {effect: all_adoption_effect_counts[effect] for effect in ADOPTION_EFFECTS},
         "all_legacy_used_count": all_legacy_used_count,
         "requested_adoption_count": main_requested_adoption_count,
@@ -1893,6 +1986,8 @@ def _summary_from_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "subagent_missing_no_kb_guard_sessions": subagent_missing_no_kb_guard,
         "subagent_adopted_sessions": all_adopted_sessions - adopted_sessions,
         "subagent_adopted_count": all_adopted_count - adopted_count,
+        "subagent_confirmed_adoption_count": all_adopted_count - adopted_count,
+        "subagent_classified_adoption_count": subagent_classified_adoption_count,
         "subagent_adoption_effects": {
             effect: subagent_adoption_effect_counts[effect] for effect in ADOPTION_EFFECTS
         },

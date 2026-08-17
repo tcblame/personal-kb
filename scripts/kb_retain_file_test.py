@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import os
+import stat
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -216,6 +217,82 @@ def test_verify_detects_hash_mismatch() -> None:
         assert verified["assets"][0]["error"] == "sha256_mismatch"
 
 
+def test_retain_preserves_large_sensitive_file_verbatim() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        src = root / "large-config.txt"
+        credential_line = b"\nAPI_" + b"TOKEN=" + b"real-" + b"secret-value-123456\n"
+        src.write_bytes(b"x" * (5 * 1024 * 1024) + credential_line)
+
+        with patch.dict(os.environ, {"PERSONAL_KB_ROOT": str(root / "personal-kb")}):
+            rc, out, err = call_main([
+                "retain", "--path", str(src), "--project-key", "study",
+                "--case-id", "large-config-260817", "--category", "configs",
+            ])
+
+        assert rc == 0, err
+        summary = json.loads(out)
+        stored = Path(summary["stored_path"])
+        assert stored.read_bytes() == src.read_bytes()
+        assert summary["size_bytes"] == src.stat().st_size
+        if os.name != "nt":
+            assert stat.S_IMODE(stored.stat().st_mode) == 0o600
+
+
+def test_reference_accepts_locator_and_rejects_pasted_secret() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        common = [
+            "reference", "--project-key", "study", "--case-id", "resource-260817",
+            "--reference-kind", "credential",
+        ]
+        with patch.dict(os.environ, {"PERSONAL_KB_ROOT": str(root / "personal-kb")}):
+            rc, out, err = call_main([*common, "--locator", "vault://personal-kb/mysql-prod"])
+            assert rc == 0, err
+            assert json.loads(out)["locator"] == "vault://personal-kb/mysql-prod"
+
+            for secret in (
+                "pass" + "word=" + "super" + "secret123",
+                "Bear" + "er " + "abcdefghijklmnopqrstuvwxyz",
+                "sk-" + "abcdefghijklmnopqrstuvwxyz123456",
+            ):
+                rc, out, err = call_main([*common, "--locator", secret])
+                assert rc == 4
+                assert not out
+                assert "pasted secret" in err
+
+
+def test_env_and_private_key_files_are_retained_verbatim() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        env_file = root / ".env"
+        env_content = "PASS" + "WORD=local-only-value-123456\n"
+        env_file.write_text(env_content, encoding="utf-8")
+        private_file = root / "id_ed25519"
+        private_content = (
+            "-----BEGIN " + "OPENSSH PRIVATE KEY-----\n"
+            "local-only-test-material\n"
+            "-----END " + "OPENSSH PRIVATE KEY-----\n"
+        )
+        private_file.write_text(private_content, encoding="utf-8")
+        with patch.dict(os.environ, {"PERSONAL_KB_ROOT": str(root / "personal-kb")}):
+            rc, out, err = call_main([
+                "retain", "--path", str(env_file), "--project-key", "study",
+                "--case-id", "env-260817", "--category", "configs",
+            ])
+            assert rc == 0, err
+            stored_env = Path(json.loads(out)["stored_path"])
+            assert stored_env.read_text(encoding="utf-8") == env_content
+
+            rc, out, err = call_main([
+                "retain", "--path", str(private_file), "--project-key", "study",
+                "--case-id", "env-260817", "--category", "configs",
+            ])
+            assert rc == 0, err
+            stored_private = Path(json.loads(out)["stored_path"])
+            assert stored_private.read_text(encoding="utf-8") == private_content
+
+
 def main() -> int:
     tests = [
         test_retain_defaults_to_copy_and_writes_manifests,
@@ -223,6 +300,9 @@ def main() -> int:
         test_existing_target_is_not_overwritten,
         test_list_show_path_and_verify_commands,
         test_verify_detects_hash_mismatch,
+        test_retain_preserves_large_sensitive_file_verbatim,
+        test_reference_accepts_locator_and_rejects_pasted_secret,
+        test_env_and_private_key_files_are_retained_verbatim,
     ]
     for test in tests:
         test()

@@ -12,17 +12,15 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-if sys.platform == "win32":
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
-    if hasattr(sys.stderr, "reconfigure"):
-        sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+if sys.platform == "win32" and hasattr(sys.stdout, "buffer"):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace", line_buffering=True)
 
 import kb_update
 import kb_session_brief
 import kb_adoption
 import kb_evidence
-from kb_lib import append_jsonl, find_entry, kb_base_dir, now_iso, read_jsonl, resolve_context
+from kb_lib import append_jsonl, find_entry, kb_base_dir, now_iso, read_jsonl, resolve_context, runtime_file
 
 
 RETRIEVAL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -420,13 +418,6 @@ def build_closeout(args: argparse.Namespace) -> dict[str, Any]:
         or session_brief_help
         or _coerce_bool(payload.get("session_brief_hit"), False)
     )
-    session_brief_fields_provided = (
-        args.session_brief_hit
-        or args.session_brief_help
-        or bool(session_brief_used)
-        or "session_brief_hit" in payload
-        or "session_brief_help" in payload
-    )
 
     closeout = {
         "closeout_id": (
@@ -463,9 +454,8 @@ def build_closeout(args: argparse.Namespace) -> dict[str, Any]:
         closeout["hit_entry_ids"] = hit_entry_ids
     if rag_calls_inferred:
         closeout["rag_calls_inferred"] = True
-    if session_brief_fields_provided:
-        closeout["session_brief_hit"] = session_brief_hit
-        closeout["session_brief_help"] = session_brief_help
+    closeout["session_brief_hit"] = session_brief_hit
+    closeout["session_brief_help"] = session_brief_help
     extra = payload.get("extra")
     if isinstance(extra, dict):
         closeout["extra"] = extra
@@ -528,7 +518,7 @@ def main(argv: list[str]) -> int:
         sys.stderr.write(f"{exc}\n")
         return 2
 
-    path = kb_base_dir() / "_meta" / "closeout.jsonl"
+    path = runtime_file("closeout.jsonl", base_dir=kb_base_dir())
     try:
         apply_used_entries(closeout, args)
         apply_session_brief(closeout, args, session_brief_payload)

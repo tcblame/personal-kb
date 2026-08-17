@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from kb_lib import append_jsonl, kb_base_dir, now_iso, read_jsonl
+from kb_lib import append_jsonl, kb_base_dir, now_iso, read_jsonl, runtime_file
 
 
 ADOPTION_EVENT = "kb_adoption"
@@ -14,9 +14,9 @@ HEAT_EFFECTS = frozenset({"decide", "fix", "write", "legacy"})
 
 
 def adoption_events_path(base_dir: Path | None = None) -> Path:
-    """Return the runtime adoption log under the KB repos directory."""
-    base = Path(base_dir) if base_dir is not None else kb_base_dir()
-    return base / "_meta" / "adoption_events.jsonl"
+    """Return the configured runtime adoption log."""
+    effective_base = kb_base_dir() if base_dir is None else base_dir
+    return runtime_file("adoption_events.jsonl", base_dir=effective_base)
 
 
 def _required_text(value: str, label: str) -> str:

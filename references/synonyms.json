@@ -2,10 +2,16 @@
   "_comment": "同义词表：搜索时自动展开查询词。key 为搜索词（lowercase），value 为展开词列表。双向：如果搜 A 能找到 B 的记录，搜 B 也能找到 A 的记录。",
   "部署": ["deploy", "发布", "上线", "release"],
   "deploy": ["部署", "发布", "上线", "release"],
+  "督办": ["dms", "ums", "supervision", "监督"],
+  "dms": ["督办", "ums", "supervision", "监督"],
+  "ums": ["督办", "dms", "supervision", "监督"],
+  "大屏": ["led", "screen", "显示屏", "展示屏"],
+  "led": ["大屏", "screen", "显示屏", "展示屏"],
+  "screen": ["大屏", "led", "显示屏", "展示屏"],
   "消息": ["mq", "message", "通知", "推送", "kafka", "rabbitmq"],
   "mq": ["消息", "message", "通知", "推送", "kafka", "rabbitmq"],
   "数据库": ["db", "database", "mysql", "oracle", "postgresql"],
-  "db": ["数据库", "database", "mysql", "oracle", "postgresql"],
+  "db": ["数据库", "database", "mysql", "oracle"],
   "缓存": ["cache", "redis", "ehcache"],
   "cache": ["缓存", "redis", "ehcache"],
   "接口": ["api", "interface", "endpoint", "controller"],
@@ -25,5 +31,8 @@
   "测试": ["test", "testing", "junit", "单元测试"],
   "test": ["测试", "testing", "junit", "单元测试"],
   "jar": ["war", "打包", "构建", "build", "maven"],
-  "war": ["jar", "打包", "构建", "build", "maven"]
+  "war": ["jar", "打包", "构建", "build", "maven"],
+  "ccs": ["cc-switch", "ccswitch", "CC Switch"],
+  "cc-switch": ["ccs", "ccswitch", "CC Switch"],
+  "ccswitch": ["ccs", "cc-switch", "CC Switch"]
 }

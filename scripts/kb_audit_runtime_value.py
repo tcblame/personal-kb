@@ -9,23 +9,16 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-if sys.platform == "win32":
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
-    if hasattr(sys.stderr, "reconfigure"):
-        sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+if sys.platform == "win32" and hasattr(sys.stdout, "buffer"):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace", line_buffering=True)
 
-from kb_lib import kb_base_dir, read_jsonl
+from kb_lib import kb_base_dir, read_jsonl, runtime_file
 
 
 def default_closeout_path(base_dir: Path | None = None) -> Path:
-    base = base_dir if base_dir is not None else kb_base_dir()
-    return base / "_meta" / "closeout.jsonl"
-
-
-def default_outcomes_path(base_dir: Path | None = None) -> Path:
-    base = base_dir if base_dir is not None else kb_base_dir()
-    return base / "_meta" / "outcome_events.jsonl"
+    effective_base = kb_base_dir() if base_dir is None else base_dir
+    return runtime_file("closeout.jsonl", base_dir=effective_base)
 
 
 def _as_int(value: Any) -> int:
@@ -71,15 +64,27 @@ def _rate(numerator: int, denominator: int) -> float:
     return round(numerator / denominator, 4)
 
 
-def build_report(
-    *,
-    path: Path,
-    last_days: int,
-    outcomes_path: Path | None = None,
-) -> dict[str, Any]:
+def _rate_or_none(numerator: int, denominator: int) -> float | None:
+    if denominator <= 0:
+        return None
+    return round(numerator / denominator, 4)
+
+
+def _row_sample(rows: list[dict[str, Any]], predicate, limit: int = 6) -> list[str]:
+    samples: list[str] = []
+    for row in rows:
+        if not predicate(row):
+            continue
+        label = str(row.get("closeout_id") or row.get("session_id") or "")
+        ts = str(row.get("ts") or "")
+        samples.append(f"{label}@{ts}" if label and ts else label or ts)
+        if len(samples) >= limit:
+            break
+    return samples
+
+
+def build_report(*, path: Path, last_days: int) -> dict[str, Any]:
     rows = read_jsonl(path) if path.exists() else []
-    resolved_outcomes_path = outcomes_path if outcomes_path is not None else default_outcomes_path()
-    outcome_rows = read_jsonl(resolved_outcomes_path) if resolved_outcomes_path.exists() else []
     since = datetime.now(timezone.utc) - timedelta(days=max(1, last_days))
 
     recent_rows: list[dict[str, Any]] = []
@@ -97,76 +102,122 @@ def build_report(
 
     closeout_total = len(recent_rows)
     hit_closeouts = sum(_as_int(row.get("hit_count")) > 0 for row in recent_rows)
-    adopted_closeouts = sum(bool(_as_list(row.get("used_entry_ids"))) for row in recent_rows)
-    adopted_hit_closeouts = sum(
+    no_hit_closeouts = sum(_as_int(row.get("hit_count")) <= 0 for row in recent_rows)
+    used_closeouts = sum(bool(_as_list(row.get("used_entry_ids"))) for row in recent_rows)
+    used_hit_closeouts = sum(
         _as_int(row.get("hit_count")) > 0 and bool(_as_list(row.get("used_entry_ids")))
         for row in recent_rows
     )
-    no_hit_closeouts = sum(_as_int(row.get("hit_count")) <= 0 for row in recent_rows)
-    hit_not_adopted_closeouts = sum(
+    adopted_closeouts = sum(bool(_as_list(row.get("adopted_entry_ids"))) for row in recent_rows)
+    adopted_hit_closeouts = sum(
+        _as_int(row.get("hit_count")) > 0 and bool(_as_list(row.get("adopted_entry_ids")))
+        for row in recent_rows
+    )
+    unconfirmed_used_closeouts = sum(
+        bool(_as_list(row.get("used_entry_ids")))
+        and not bool(_as_list(row.get("adopted_entry_ids")))
+        for row in recent_rows
+    )
+    unconfirmed_used_hit_closeouts = sum(
+        _as_int(row.get("hit_count")) > 0
+        and bool(_as_list(row.get("used_entry_ids")))
+        and not bool(_as_list(row.get("adopted_entry_ids")))
+        for row in recent_rows
+    )
+    hit_not_used_closeouts = sum(
         _as_int(row.get("hit_count")) > 0 and not bool(_as_list(row.get("used_entry_ids")))
+        for row in recent_rows
+    )
+    hit_not_adopted_closeouts = sum(
+        _as_int(row.get("hit_count")) > 0 and not bool(_as_list(row.get("adopted_entry_ids")))
         for row in recent_rows
     )
     written_closeouts = sum(bool(_as_list(row.get("written_entry_ids"))) for row in recent_rows)
     updated_closeouts = sum(bool(_as_list(row.get("updated_entry_ids"))) for row in recent_rows)
     session_brief_hit_closeouts = sum(_as_bool(row.get("session_brief_hit")) for row in recent_rows)
     session_brief_help_closeouts = sum(_as_bool(row.get("session_brief_help")) for row in recent_rows)
-
-    recent_outcomes: list[dict[str, Any]] = []
-    skipped_invalid_outcome_ts = 0
-    for row in outcome_rows:
-        if row.get("schema") != "personal-kb.outcome-event/v1":
-            continue
-        ts = _parse_ts(row.get("created_at"))
-        if ts is None:
-            skipped_invalid_outcome_ts += 1
-            continue
-        if ts >= since:
-            recent_outcomes.append(row)
-
-    accepted_outcomes = sum(row.get("user_verdict") == "accepted" for row in recent_outcomes)
-    rejected_outcomes = sum(row.get("user_verdict") == "rejected" for row in recent_outcomes)
-    decided_outcomes = accepted_outcomes + rejected_outcomes
-    recurrence_observed_outcomes = sum(
-        row.get("recurrence") == "observed" for row in recent_outcomes
+    session_brief_telemetry_present = sum(
+        "session_brief_hit" in row or "session_brief_help" in row
+        for row in recent_rows
     )
-    recurrence_not_observed_outcomes = sum(
-        row.get("recurrence") == "not_observed" for row in recent_outcomes
+    session_brief_telemetry_missing = closeout_total - session_brief_telemetry_present
+    linked_retrieval_id_missing = sum(
+        _as_int(row.get("rag_calls")) > 0
+        and not bool(_as_list(row.get("linked_retrieval_ids")))
+        for row in recent_rows
     )
-    recurrence_decided_outcomes = recurrence_observed_outcomes + recurrence_not_observed_outcomes
+    closeout_integrity_missing = sum(
+        (
+            _as_int(row.get("rag_calls")) > 0
+            and not bool(_as_list(row.get("linked_retrieval_ids")))
+        )
+        or ("session_brief_hit" not in row or "session_brief_help" not in row)
+        for row in recent_rows
+    )
+    closeout_integrity_missing_rate = _rate_or_none(
+        closeout_integrity_missing,
+        closeout_total,
+    )
+    self_reported_use_rate = _rate(used_hit_closeouts, hit_closeouts)
+    confirmed_use_rate = _rate(adopted_hit_closeouts, hit_closeouts)
+    adoption_confirmation_rate = _rate(adopted_closeouts, used_closeouts)
+    session_brief_help_rate = _rate_or_none(session_brief_help_closeouts, session_brief_hit_closeouts)
+    session_brief_telemetry_missing_rate = _rate_or_none(
+        session_brief_telemetry_missing,
+        closeout_total,
+    )
 
     summary = (
-        f"{last_days}d closeouts={closeout_total}, hits={hit_closeouts}, adopted={adopted_hit_closeouts}, "
-        f"use_rate={_rate(adopted_hit_closeouts, hit_closeouts)}, "
-        f"outcomes={len(recent_outcomes)}, acceptance={_rate(accepted_outcomes, decided_outcomes)}"
+        f"{last_days}d closeouts={closeout_total}, hits={hit_closeouts}, "
+        f"used_hits={used_hit_closeouts}, confirmed_adoptions={adopted_hit_closeouts}, "
+        f"self_reported_use_rate={self_reported_use_rate}, confirmed_use_rate={confirmed_use_rate}, "
+        f"unconfirmed_used_hits={unconfirmed_used_hit_closeouts}, "
+        f"linked_retrieval_id_missing={linked_retrieval_id_missing}, "
+        f"closeout_integrity_missing={closeout_integrity_missing}, "
+        f"session_brief_help_rate={'n/a' if session_brief_help_rate is None else session_brief_help_rate}, "
+        f"session_brief_telemetry_missing={session_brief_telemetry_missing}"
     )
 
     return {
         "closeout_path": str(path),
-        "outcomes_path": str(resolved_outcomes_path),
         "last_days": max(1, last_days),
         "since": since.isoformat(timespec="seconds"),
         "closeout_total": closeout_total,
         "hit_closeouts": hit_closeouts,
+        "used_closeouts": used_closeouts,
+        "used_hit_closeouts": used_hit_closeouts,
+        "self_reported_use_rate": self_reported_use_rate,
         "adopted_closeouts": adopted_closeouts,
         "adopted_hit_closeouts": adopted_hit_closeouts,
-        "use_rate": _rate(adopted_hit_closeouts, hit_closeouts),
+        "confirmed_use_rate": confirmed_use_rate,
+        "adoption_confirmation_rate": adoption_confirmation_rate,
+        "use_rate": confirmed_use_rate,
+        "unconfirmed_used_closeouts": unconfirmed_used_closeouts,
+        "unconfirmed_used_hit_closeouts": unconfirmed_used_hit_closeouts,
         "no_hit_closeouts": no_hit_closeouts,
+        "hit_not_used_closeouts": hit_not_used_closeouts,
         "hit_not_adopted_closeouts": hit_not_adopted_closeouts,
         "written_closeouts": written_closeouts,
         "updated_closeouts": updated_closeouts,
         "session_brief_hit_closeouts": session_brief_hit_closeouts,
         "session_brief_help_closeouts": session_brief_help_closeouts,
-        "session_brief_help_rate": _rate(session_brief_help_closeouts, session_brief_hit_closeouts),
-        "outcome_event_total": len(recent_outcomes),
-        "accepted_outcomes": accepted_outcomes,
-        "rejected_outcomes": rejected_outcomes,
-        "user_acceptance_rate": _rate(accepted_outcomes, decided_outcomes),
-        "recurrence_observed_outcomes": recurrence_observed_outcomes,
-        "recurrence_not_observed_outcomes": recurrence_not_observed_outcomes,
-        "recurrence_rate": _rate(recurrence_observed_outcomes, recurrence_decided_outcomes),
+        "session_brief_help_rate": session_brief_help_rate,
+        "session_brief_telemetry_present": session_brief_telemetry_present,
+        "session_brief_telemetry_missing": session_brief_telemetry_missing,
+        "session_brief_telemetry_missing_rate": session_brief_telemetry_missing_rate,
+        "linked_retrieval_id_missing": linked_retrieval_id_missing,
+        "closeout_integrity_missing": closeout_integrity_missing,
+        "closeout_integrity_missing_rate": closeout_integrity_missing_rate,
+        "unconfirmed_used_sample": _row_sample(
+            recent_rows,
+            lambda row: bool(_as_list(row.get("used_entry_ids")))
+            and not bool(_as_list(row.get("adopted_entry_ids"))),
+        ),
+        "confirmed_adoption_sample": _row_sample(
+            recent_rows,
+            lambda row: bool(_as_list(row.get("adopted_entry_ids"))),
+        ),
         "skipped_invalid_ts_rows": skipped_invalid_ts,
-        "skipped_invalid_outcome_ts_rows": skipped_invalid_outcome_ts,
         "summary": summary,
     }
 
@@ -179,14 +230,12 @@ def _print_text(report: dict[str, Any]) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Audit whether recent personal-kb closeouts are producing usable runtime value.")
     parser.add_argument("--closeout", default="", help="Override closeout.jsonl path")
-    parser.add_argument("--outcomes", default="", help="Override outcome_events.jsonl path")
     parser.add_argument("--last-days", type=int, default=7, help="Only include recent closeouts from the last N days")
     parser.add_argument("--text", action="store_true", help="Print a short text line before the JSON payload")
     args = parser.parse_args(argv)
 
     path = Path(args.closeout).expanduser() if args.closeout else default_closeout_path()
-    outcomes_path = Path(args.outcomes).expanduser() if args.outcomes else default_outcomes_path()
-    report = build_report(path=path, outcomes_path=outcomes_path, last_days=args.last_days)
+    report = build_report(path=path, last_days=args.last_days)
     if args.text:
         _print_text(report)
     else:

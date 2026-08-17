@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from kb_lib import kb_base_dir, now_iso, read_jsonl
+from kb_lib import cache_dir_for_records, kb_base_dir, now_iso, read_jsonl
 
 
 KEYWORD_FIELDS = ("tags", "aliases", "trigger_terms")
@@ -58,7 +58,7 @@ def _load_old_index(index_path: Path) -> dict[str, dict[str, Any]]:
 
 
 def _build_inverted_index(root: Path, *, preserve_search_count: bool) -> tuple[dict[str, dict[str, Any]], dict[str, int]]:
-    index_path = root.parent / "_meta" / "_index" / "keywords.json"
+    index_path = cache_dir_for_records(root) / "_index" / "keywords.json"
     old = _load_old_index(index_path) if preserve_search_count else {}
     new: dict[str, dict[str, Any]] = {}
     stats = {"files": 0, "entries_seen": 0, "entries_indexed": 0, "keywords": 0}
@@ -153,7 +153,7 @@ def _rebuild_bucket_indexes(root: Path, *, apply: bool, prune_orphans: bool) -> 
 
 
 def _clean_aggregation_bom(root: Path, *, apply: bool) -> dict[str, Any]:
-    agg_dir = root.parent / "_meta" / "_aggregations"
+    agg_dir = cache_dir_for_records(root) / "_aggregations"
     stats = {"aggregation_files": 0, "bom_files": [], "bom_cleaned": 0}
     if not agg_dir.exists():
         return stats
@@ -215,7 +215,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     inverted, inverted_stats = _build_inverted_index(root, preserve_search_count=not args.drop_search_count)
-    index_path = root.parent / "_meta" / "_index" / "keywords.json"
+    index_path = cache_dir_for_records(root) / "_index" / "keywords.json"
     if args.apply:
         _write_json(index_path, inverted)
 

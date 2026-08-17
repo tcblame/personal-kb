@@ -119,12 +119,7 @@ def _evidence_level(entry: dict[str, Any]) -> str:
         return "canonical_or_user_confirmed"
     paths = _string_list(entry.get("source_paths"))
     has_primary = any(str(path).lower().endswith(PRIMARY_SUFFIXES) or "/src/" in str(path).lower() for path in paths)
-    derived_markers = ("/docs/", "/artifacts/", "/generated/")
-    has_derived = any(
-        str(path).replace("\\", "/").lower().startswith(("docs/", "artifacts/", "generated/"))
-        or any(marker in str(path).replace("\\", "/").lower() for marker in derived_markers)
-        for path in paths
-    )
+    has_derived = any("/interview-java-backend/" in str(path) or str(path).startswith("docs/") for path in paths)
     if has_primary and has_derived:
         return "mixed"
     if has_primary:

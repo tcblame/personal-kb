@@ -13,28 +13,15 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-if sys.platform == "win32":
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
-    if hasattr(sys.stderr, "reconfigure"):
-        sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+if sys.platform == "win32" and hasattr(sys.stdout, "buffer"):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace", line_buffering=True)
 
 import kb_search
 import kb_session_brief
 import kb_evidence
-import kb_outcome_event
 from kb_kinds import VALID_KINDS, parse_kind_filter, parse_legacy_type_filter
-from kb_lib import (
-    IdempotencyConflictError,
-    JsonlSafetyError,
-    expand_query,
-    kb_base_dir,
-    load_config,
-    load_synonyms,
-    now_iso,
-    persist_idempotent_jsonl_record,
-    validate_scope_anchor_bindings,
-)
+from kb_lib import JsonlSafetyError, expand_query, load_config, load_synonyms
 
 
 MATCH_FIELDS = (
@@ -73,7 +60,6 @@ SUMMARY_FIELDS = (
 
 CURRENT_STATUSES = {"", "active", "current", "implemented", "decision_confirmed", "partial_current"}
 RETRIEVAL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
-RETRIEVAL_RECEIPT_SCHEMA = "personal-kb.retrieval-receipt/v1"
 
 
 def _retrieval_id(value: str) -> str:
@@ -83,85 +69,6 @@ def _retrieval_id(value: str) -> str:
             "--retrieval-id must be 1-128 opaque characters using letters, digits, '.', '_', ':', or '-'"
         )
     return candidate
-
-
-def retrieval_receipts_path(base_dir: Path | None = None) -> Path:
-    base = Path(base_dir) if base_dir is not None else kb_base_dir()
-    return base / "_meta" / "retrieval_receipts.jsonl"
-
-
-def _scope_anchors(values: list[str] | tuple[str, ...] | None) -> list[str]:
-    anchors: list[str] = []
-    for raw in values or []:
-        value = str(raw).strip()
-        if not value:
-            raise ValueError("--scope-anchor must be a non-empty string")
-        if value not in anchors:
-            anchors.append(value)
-    return anchors
-
-
-def _receipt_from_payload(
-    payload: dict[str, Any],
-    *,
-    scope_anchors: list[str],
-    created_at: str = "",
-) -> dict[str, Any]:
-    query = str(payload.get("query") or "")
-    anchors = _scope_anchors(scope_anchors)
-    validate_scope_anchor_bindings(query, anchors)
-    hits: list[dict[str, str]] = []
-    for item in payload.get("items") or []:
-        if not isinstance(item, dict):
-            raise ValueError("retrieval items must be objects before receipt persistence")
-        entry_id = str(item.get("entry_id") or "").strip()
-        record_rev = str(item.get("record_rev") or "").strip()
-        freshness_state = str(item.get("freshness_state") or "").strip()
-        if not entry_id or not record_rev or not freshness_state:
-            raise ValueError(
-                "each retrieval receipt hit requires entry_id, record_rev, and freshness_state"
-            )
-        hits.append(
-            {
-                "entry_id": entry_id,
-                "record_rev": record_rev,
-                "freshness_state": freshness_state,
-            }
-        )
-
-    return {
-        "schema": RETRIEVAL_RECEIPT_SCHEMA,
-        "retrieval_id": _retrieval_id(str(payload.get("retrieval_id") or "")),
-        "query": query,
-        "repo": str(payload.get("repo") or ""),
-        "branch": str(payload.get("branch") or ""),
-        "scope_anchors": anchors,
-        "hits": hits,
-        "created_at": created_at.strip() if isinstance(created_at, str) and created_at.strip() else now_iso(),
-    }
-
-
-def persist_retrieval_receipt(
-    payload: dict[str, Any],
-    *,
-    scope_anchors: list[str],
-    receipt_output: str | Path | None = None,
-    base_dir: Path | None = None,
-    created_at: str = "",
-) -> dict[str, Any]:
-    receipt = _receipt_from_payload(
-        payload,
-        scope_anchors=scope_anchors,
-        created_at=created_at,
-    )
-    mirror = Path(receipt_output).expanduser() if receipt_output else None
-    canonical, _appended = persist_idempotent_jsonl_record(
-        retrieval_receipts_path(base_dir),
-        receipt,
-        id_field="retrieval_id",
-        mirror_path=mirror,
-    )
-    return canonical
 
 STRONG_FIELDS = {"title", "trigger_terms", "source_paths", "key_files"}
 MEDIUM_FIELDS = {"tags", "aliases", "key_facts", "term", "definition", "repo", "branch"}
@@ -234,6 +141,7 @@ NON_KB_MAINTENANCE_MARKERS = (
     "所有 skill 和 mcp",
     "全部 skill 和 mcp",
     "安装 skill",
+    "cc-switch",
 )
 
 CONTEXT_GENERIC_TERMS = {
@@ -253,27 +161,32 @@ CONTEXT_GENERIC_TERMS = {
     "codex",
     "claude",
     "gemini",
+    "interview-java-backend",
+    "java后端",
+    "java面试",
+    "python后端",
+    "ai应用",
+    "springboot",
+    "spring-boot",
+    "技术栈",
 }
 
 ARTIFACT_QUERY_MARKERS = (
-    "文档",
-    "文件",
+    "简历",
+    "面试材料",
+    "简历素材",
+    "项目经历",
+    "工作经历",
+    "面试讲稿",
+    "面试官追问",
+    "八股",
+    "训练卡",
+    "速查",
     "资料",
     "材料",
-    "报告",
-    "清单",
-    "模板",
-    "规范",
-    "路径",
-    "入口",
-    "当前版本",
-    "批准版本",
-    "权威版本",
-    "artifact",
     "artifact_locator",
-    "canonical",
     "canonical_content",
-    "source of truth",
+    "00-当前版本.md",
 )
 
 FAULT_QUERY_MARKERS = (
@@ -362,25 +275,21 @@ DECISION_QUERY_FILLERS = (
 )
 
 DECISION_TOPIC_MARKERS = (
-    "版本",
-    "结构",
-    "格式",
-    "范围",
-    "仓库",
-    "分支",
-    "路径",
-    "目录",
-    "模块",
-    "组件",
-    "接口",
-    "配置",
-    "部署",
-    "命名",
-    "验收",
-    "工作流",
-    "方案",
-    "架构",
+    "00-当前版本.md",
+    "canonical_content",
+    "简历结构",
+    "工作经历",
+    "项目经历",
+    "公司项目",
+    "在线考试",
+    "learnai",
+    "kys",
+    "南沙",
+    "dms",
+    "个人负责范围",
+    "代码存在",
     "技术栈",
+    "简历",
 )
 
 DECISION_AUTHORITY_MARKERS = (
@@ -593,25 +502,26 @@ def _is_prior_decision_query(query: str) -> bool:
             "沿用",
             "口径",
             "方案",
-            "结构",
-            "格式",
-            "配置",
-            "范围",
-            "路径",
-            "命名",
-            "验收",
-            "工作流",
+            "简历",
+            "工作经历",
+            "项目经历",
         )
     )
     return ambiguous_history and decision_context
 
 
 def _concrete_query_terms(query: str) -> list[str]:
-    return [
+    terms = [
         term
         for term in _specific_terms(_query_planning_terms(query))
         if term not in CONTEXT_GENERIC_TERMS
     ]
+    compact = query.lower()
+    if re.search(r"\bcc[\s_-]+switch\b", compact):
+        terms = [term for term in terms if term not in {"cc", "switch", "cc_switch"}]
+        if "cc-switch" not in terms:
+            terms.insert(0, "cc-switch")
+    return terms
 
 
 def _decision_subject_terms(query: str) -> list[str]:
@@ -624,6 +534,18 @@ def _decision_subject_terms(query: str) -> list[str]:
     for marker in DECISION_TOPIC_MARKERS:
         if marker.lower() in lower and marker.lower() not in terms:
             terms.append(marker.lower())
+    if "在线考试" in lower and "考试" not in terms:
+        terms.append("考试")
+    if "resume" in lower and "简历" not in terms:
+        terms.insert(0, "简历")
+    if "work experience" in lower and "工作经历" not in terms:
+        terms.insert(0, "工作经历")
+    if "project experience" in lower and "项目经历" not in terms:
+        terms.insert(0, "项目经历")
+    if any(marker in lower for marker in ("单列", "拆出", "独立项目")):
+        for marker in ("简历结构", "工作经历", "项目经历"):
+            if marker not in terms:
+                terms.append(marker)
     return terms
 
 
@@ -789,8 +711,8 @@ def _plan_query_groups(query: str, *, enabled: bool = True) -> list[QueryPlan]:
         query, "kb_", "personal kb", "加热", "使用后", "检索增强"
     )
 
-    # Configured intent groups go first so broad terms cannot fill the result
-    # window before a concrete query anchor is searched.
+    # Domain-specific groups go first. They prevent broad terms such as "agent" or
+    # "面试材料" from filling the result window before the real anchor is searched.
     for intent_plan in _intent_plans(query):
         if intent_plan.name == "retrieval-expansion" and hard:
             intent_plan = QueryPlan(
@@ -1089,55 +1011,6 @@ def _recent_session_rank(item: dict[str, Any], *, index: int) -> float:
     return round(6.0 + raw_score * 0.55 + confidence * 2.4 - index * 0.05, 4)
 
 
-def _attach_outcome_feedback(items: list[dict[str, Any]]) -> None:
-    keys = {
-        (
-            str(item.get("repo") or "").strip(),
-            str(item.get("branch") or "").strip(),
-            str(item.get("entry_id") or "").strip(),
-        )
-        for item in items
-        if str(item.get("entry_id") or "").strip()
-    }
-    feedback_by_key = kb_outcome_event.outcome_feedback_for_entries(keys)
-    for item in items:
-        key = (
-            str(item.get("repo") or "").strip(),
-            str(item.get("branch") or "").strip(),
-            str(item.get("entry_id") or "").strip(),
-        )
-        feedback = feedback_by_key.get(key)
-        if not feedback:
-            continue
-        rendered = dict(feedback)
-        last_event = dict(rendered.get("last_event") or {})
-        if item.get("cross_project"):
-            last_event = {
-                field: last_event.get(field)
-                for field in (
-                    "event_id",
-                    "created_at",
-                    "record_rev",
-                    "recurrence",
-                    "user_verdict",
-                )
-            }
-        rendered["last_event"] = last_event
-        item["outcome_feedback"] = rendered
-
-        rejected = int(rendered.get("rejected_count") or 0)
-        recurred = int(rendered.get("recurrence_observed_count") or 0)
-        if rejected or recurred:
-            _append_warning(
-                item,
-                f"prior outcome feedback requires recheck: rejected={rejected}, recurrence_observed={recurred}",
-            )
-        last_rev = str(last_event.get("record_rev") or "").strip()
-        current_rev = str(item.get("record_rev") or "").strip()
-        if last_rev and current_rev and last_rev != current_rev:
-            _append_warning(item, "latest outcome feedback applies to an earlier record revision")
-
-
 def _is_personal_kb_runtime_entry(entry: dict[str, Any]) -> bool:
     combined = " ".join(
         _field_text(entry.get(field)).lower()
@@ -1168,9 +1041,6 @@ def _compact_entry(
     is_cross_project = bool(formatted_entry.get("_cross_project"))
     freshness = kb_evidence.verify_entry_evidence(raw_entry)
     freshness_state = str(freshness.get("state") or "legacy_unverified")
-    record_rev = str(raw_entry.get("record_rev") or "").strip()
-    if not record_rev:
-        record_rev = kb_evidence.canonical_entry_revision(raw_entry)
     if freshness_state != "fresh" and freshness.get("warning"):
         warnings.append(str(freshness["warning"]))
 
@@ -1189,7 +1059,6 @@ def _compact_entry(
         # quality, not the probability that the historical fact is still true.
         "retrieval_score": retrieval_score,
         "confidence": retrieval_score,
-        "record_rev": record_rev,
         "freshness_state": freshness_state,
         "freshness_scope": freshness.get("scope", "local_head"),
         "evidence_strength": kb_evidence.evidence_strength(raw_entry, freshness),
@@ -1276,7 +1145,6 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
     original_terms = _query_planning_terms(args.query)
     required_tags = kb_search._parse_tags(args.tags)
     reference_repo = None
-    reference_branch = None
     candidates: dict[str, dict[str, Any]] = {}
     rejected_count = 0
     rejected_nonactionable_count = 0
@@ -1305,7 +1173,6 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
             ):
                 rejected_count += 1
                 continue
-            item["record_rev"] = str(item.get("record_rev") or "").strip() or kb_evidence.canonical_entry_revision(item)
             item["retrieval_score"] = float(item.get("confidence") or 0.0)
             item["freshness_state"] = "runtime_recent"
             item["freshness_scope"] = "session_brief_window"
@@ -1340,7 +1207,6 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
 
         if reference_repo is None and not args.global_search and ctx is not None:
             reference_repo = ctx.repo_name
-            reference_branch = ctx.branch
 
         for raw_rank, raw in enumerate(raw_results):
             if not args.include_noncurrent and _is_noncurrent(raw):
@@ -1486,7 +1352,6 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
         items = retained
 
     items = items[:requested_limit]
-    _attach_outcome_feedback(items)
     items, truncation = _apply_total_char_budget(items, max_total_chars=args.max_total_chars)
 
     payload = {
@@ -1496,8 +1361,6 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
         "limit": requested_limit,
         "mode": "read_only_rag_context",
         "repo": "global" if args.global_search else (reference_repo or ""),
-        "branch": (args.branch.strip() if args.global_search else (reference_branch or args.branch.strip())),
-        "scope_anchors": _scope_anchors(getattr(args, "scope_anchor", [])),
         "query_groups": query_group_payload,
         "rejected_weak_count": rejected_count,
         "items": items,
@@ -1571,17 +1434,6 @@ def main(argv: list[str]) -> int:
         default="",
         help="Optional opaque runtime correlation ID; generated automatically when omitted",
     )
-    parser.add_argument(
-        "--scope-anchor",
-        action="append",
-        default=[],
-        help="Concrete logical-task scope anchor whose value occurs in the query; repeatable",
-    )
-    parser.add_argument(
-        "--receipt-output",
-        default="",
-        help="Optional path for an atomic single-JSON copy of the canonical retrieval receipt",
-    )
     parser.add_argument("--repo", default="", help="Override repo bucket")
     parser.add_argument("--branch", default="", help="Override branch bucket")
     parser.add_argument(
@@ -1612,21 +1464,10 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     try:
-        scope_anchors = _scope_anchors(args.scope_anchor)
-        validate_scope_anchor_bindings(args.query, scope_anchors)
         payload = build_context(args)
-        persist_retrieval_receipt(
-            payload,
-            scope_anchors=scope_anchors,
-            receipt_output=args.receipt_output or None,
-        )
-    except (ValueError, IdempotencyConflictError, JsonlSafetyError, OSError) as exc:
+    except (ValueError, JsonlSafetyError) as exc:
         sys.stderr.write(f"error: {exc}\n")
-        if isinstance(exc, ValueError):
-            return 2
-        if isinstance(exc, IdempotencyConflictError):
-            return 4
-        return 5
+        return 5 if isinstance(exc, JsonlSafetyError) else 2
 
     if args.json:
         sys.stdout.write(json.dumps(payload, ensure_ascii=False, indent=2))

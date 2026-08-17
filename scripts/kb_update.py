@@ -328,7 +328,7 @@ def _main(argv: list[str]) -> int:
             findings = sensitive_findings(entry)
             if findings:
                 sys.stderr.write(
-                    "Sensitive credential-shaped content detected; store a redacted summary or retained evidence reference instead. "
+                    "Sensitive credential-shaped content detected in the durable row; retain full bytes as a local asset and store its asset_id, or use a redacted summary. "
                     f"finding_types={','.join(findings)}\n"
                 )
                 return 4

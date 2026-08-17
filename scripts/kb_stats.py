@@ -7,17 +7,13 @@ from pathlib import Path
 from collections import Counter
 from datetime import datetime, timedelta
 
-from kb_lib import kb_base_dir
-
 # Windows UTF-8 输出修复
-if sys.platform == 'win32':
-    if hasattr(sys.stdout, 'reconfigure'):
-        sys.stdout.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)
-    if hasattr(sys.stderr, 'reconfigure'):
-        sys.stderr.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)
+if sys.platform == 'win32' and hasattr(sys.stdout, 'buffer'):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace', line_buffering=True)
 
 def main():
-    log_dir = kb_base_dir().parent / "runtime" / "logs"
+    log_dir = Path.home() / ".codex" / "personal-kb-logs"
 
     # 读取搜索日志
     search_log = log_dir / "kb_search.log"

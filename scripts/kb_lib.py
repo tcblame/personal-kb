@@ -10,8 +10,7 @@ import subprocess
 import sys
 import tempfile
 import shutil
-import unicodedata
-from contextlib import ExitStack, contextmanager, nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,8 +23,25 @@ class JsonlSafetyError(RuntimeError):
     """Raised when a JSONL file cannot be read safely."""
 
 
-class IdempotencyConflictError(RuntimeError):
-    """Raised when one runtime ID is reused for different semantic content."""
+class PersonalKbConfigError(ValueError):
+    """Raised when the canonical Personal KB configuration is invalid."""
+
+
+@dataclass(frozen=True)
+class StorageLayout:
+    """Canonical single-root layout derived from config.json.
+
+    ``records`` is the only durable retrieval source. The other directories
+    contain evidence, manifests, runtime events, or rebuildable caches and
+    are always resolved below the same root.
+    """
+
+    root: Path
+    records: Path
+    retained_files: Path
+    manifests: Path
+    runtime: Path
+    cache: Path
 
 
 _GIT_CONFLICT_MARKER_RE = re.compile(
@@ -425,43 +441,130 @@ def _normalize_personal_kb_root(value: str | Path) -> Path:
     - `/path/to/personal-kb`
     - `/path/to/personal-kb/repos`
     """
-    root = Path(value).expanduser()
+    raw = os.path.expandvars(str(value).strip())
+    if not raw or "${" in raw:
+        raise PersonalKbConfigError("Personal KB root 不能为空，且必须先解析环境变量")
+    root = Path(raw).expanduser()
     if root.name == "repos":
         root = root.parent
-    return root
+    # Do not silently create a relative/ambiguous second data source.
+    if not root.is_absolute():
+        raise PersonalKbConfigError(f"Personal KB root 必须是绝对路径: {value}")
+    return root.resolve(strict=False)
+
+
+def _configured_root_from_env() -> Path | None:
+    for key in ("PERSONAL_KB_ROOT", "PERSONAL_KB_HOME"):
+        value = os.environ.get(key)
+        if value and value.strip():
+            return _normalize_personal_kb_root(value)
+    return None
 
 
 def personal_kb_root_dir() -> Path:
-    """返回项目 Skill 内的 personal-kb 数据根目录。
+    """返回 personal-kb 数据根目录。
 
     查找顺序：
-    1. 测试或显式维护使用的 `PERSONAL_KB_ROOT` / `PERSONAL_KB_HOME`
-    2. Skill 配置中的相对目录，默认是 `<skill>/storage`
-    3. 配置缺失时仍回退到 `<skill>/storage`
+    1. 明确设置的环境变量 `PERSONAL_KB_ROOT` / `PERSONAL_KB_HOME`
+    2. 当前 Skill 配置中的 `storage.root`
+
+    不再回退到工作目录或历史 Windows 路径，避免出现无法察觉的影子 KB。
     """
-    for key in ("PERSONAL_KB_ROOT", "PERSONAL_KB_HOME"):
-        value = os.environ.get(key)
-        if value:
-            return _normalize_personal_kb_root(value)
+    env_root = _configured_root_from_env()
+    if env_root is not None:
+        return env_root
 
-    config_path = skill_root_dir() / "config.json"
-    if config_path.exists():
-        try:
-            with config_path.open("r", encoding="utf-8") as f:
-                storage_root = json.load(f).get("storage", {}).get("root")
-            if storage_root:
-                root = _normalize_personal_kb_root(storage_root)
-                if not root.is_absolute():
-                    root = skill_root_dir() / root
-                return root
-        except (json.JSONDecodeError, OSError, AttributeError):
-            pass
+    config = load_config()
+    storage = config.get("storage") if isinstance(config, dict) else None
+    storage_root = storage.get("root") if isinstance(storage, dict) else None
+    if not isinstance(storage_root, str) or not storage_root.strip():
+        raise PersonalKbConfigError(
+            "未配置 Personal KB 数据根。请在 config.json 设置 storage.root，"
+            "或显式设置 PERSONAL_KB_ROOT（仅建议用于测试）。"
+        )
+    return _normalize_personal_kb_root(storage_root)
 
-    return skill_root_dir() / "storage"
+
+def _resolve_storage_child(root: Path, value: Any, key: str, default: str) -> Path:
+    raw = default if value is None else str(value).strip()
+    if not raw:
+        raw = default
+    raw = os.path.expandvars(raw)
+    child = Path(raw).expanduser()
+    if child.is_absolute():
+        raise PersonalKbConfigError(f"storage.{key} 必须是 root 下的相对路径: {raw}")
+    if any(part == ".." for part in child.parts):
+        raise PersonalKbConfigError(f"storage.{key} 不得包含 ..: {raw}")
+    resolved_root = root.resolve(strict=False)
+    resolved = (resolved_root / child).resolve(strict=False)
+    try:
+        resolved.relative_to(resolved_root)
+    except ValueError as exc:
+        raise PersonalKbConfigError(f"storage.{key} 逃出了 canonical root: {raw}") from exc
+    return resolved
+
+
+def storage_layout() -> StorageLayout:
+    """Return all configured paths under the single canonical root."""
+    root = personal_kb_root_dir()
+    config = load_config()
+    storage = config.get("storage") if isinstance(config, dict) else {}
+    if not isinstance(storage, dict):
+        storage = {}
+    return StorageLayout(
+        root=root,
+        records=_resolve_storage_child(root, storage.get("records"), "records", "repos"),
+        retained_files=_resolve_storage_child(root, storage.get("retained_files"), "retained_files", "retained-files"),
+        manifests=_resolve_storage_child(root, storage.get("manifests"), "manifests", "manifests"),
+        runtime=_resolve_storage_child(root, storage.get("runtime"), "runtime", "runtime"),
+        cache=_resolve_storage_child(root, storage.get("cache"), "cache", "cache"),
+    )
 
 
 def kb_base_dir() -> Path:
-    return personal_kb_root_dir() / "repos"
+    return storage_layout().records
+
+
+def retained_files_dir() -> Path:
+    return storage_layout().retained_files
+
+
+def manifests_dir() -> Path:
+    return storage_layout().manifests
+
+
+def runtime_dir() -> Path:
+    return storage_layout().runtime
+
+
+def cache_dir() -> Path:
+    return storage_layout().cache
+
+
+def _same_resolved_path(left: Path, right: Path) -> bool:
+    try:
+        return left.resolve(strict=False) == right.resolve(strict=False)
+    except OSError:
+        return str(left) == str(right)
+
+
+def runtime_dir_for_records(records_dir: Path | None = None) -> Path:
+    """Resolve runtime storage for canonical records or an explicit test corpus."""
+    if records_dir is None or _same_resolved_path(Path(records_dir), kb_base_dir()):
+        return runtime_dir()
+    return Path(records_dir) / "_meta"
+
+
+def cache_dir_for_records(records_dir: Path | None = None) -> Path:
+    """Resolve derived-cache storage for canonical records or an explicit test corpus."""
+    if records_dir is None or _same_resolved_path(Path(records_dir), kb_base_dir()):
+        return cache_dir()
+    return Path(records_dir).parent / "_meta"
+
+
+def runtime_file(name: str, *, base_dir: Path | None = None) -> Path:
+    """Resolve a runtime file while retaining explicit test-base compatibility."""
+    return runtime_dir_for_records(base_dir) / name
 
 
 def global_bucket_dir() -> Path:
@@ -621,11 +724,16 @@ def resolve_context(
             else:
                 repo_name = cwd_path.name
 
-        # 如果 repo_name 包含路径分隔符（如 group/project），保留嵌套结构
+        # 如果 repo_name 包含路径分隔符（如 example-project-b/no-git/example-branch-b），保留嵌套结构
         # 判断路径是否已经包含分支信息（最后一个segment是分支名）
         if "/" in repo_name or "\\" in repo_name:
             repo_name_safe = _safe_dir_name(repo_name, fallback="unknown-repo", allow_slash=True).lower()
             parts = repo_name_safe.split("/")
+
+            # 检查是否已经包含分支信息：
+            # 如果倒数第二个是 "no-git" 或者最后有3+个部分，认为已包含分支
+            # 例如：example-project-b/no-git/example-branch-b 中，no-git 是父目录分支，example-branch-b 是子仓库
+            # 正确结构应该是：example-project-b/no-git/example-branch-b/master（还需要子仓库分支）
 
             repo_name = repo_name_safe
             repo_dir = kb_base_dir()
@@ -752,180 +860,6 @@ def append_jsonl(path: Path, obj: dict[str, Any], *, lock_held: bool = False) ->
     entry_id = obj.get("id")
     if entry_id:
         _update_time_index_for_entry(entry_id)
-
-
-def _semantic_json(value: dict[str, Any], *, ignored_fields: frozenset[str]) -> str:
-    payload = {key: item for key, item in value.items() if key not in ignored_fields}
-    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-
-
-def _normalized_scope_binding_text(value: str) -> str:
-    return " ".join(unicodedata.normalize("NFKC", value).casefold().split())
-
-
-def _scope_anchor_binding_phrase(anchor: str) -> str:
-    normalized = unicodedata.normalize("NFKC", anchor).strip()
-    label, separator, value = normalized.partition(":")
-    typed_label = (
-        bool(separator)
-        and 2 <= len(label) <= 64
-        and all(character.isalnum() or character in "._-" for character in label)
-        and not value.startswith("//")
-    )
-    if typed_label:
-        if not value.strip():
-            raise ValueError(f"--scope-anchor {anchor!r} requires a value after ':'")
-        return value.strip()
-    return normalized
-
-
-def _contains_scope_binding(query: str, phrase: str) -> bool:
-    start = 0
-    while True:
-        index = query.find(phrase, start)
-        if index < 0:
-            return False
-        end = index + len(phrase)
-        before = query[index - 1] if index else ""
-        after = query[end] if end < len(query) else ""
-        ascii_start = phrase[0].isascii() and (phrase[0].isalnum() or phrase[0] == "_")
-        ascii_end = phrase[-1].isascii() and (phrase[-1].isalnum() or phrase[-1] == "_")
-        left_bound = not ascii_start or not (
-            before.isascii() and (before.isalnum() or before == "_")
-        )
-        right_bound = not ascii_end or not (
-            after.isascii() and (after.isalnum() or after == "_")
-        )
-        if left_bound and right_bound:
-            return True
-        start = index + 1
-
-
-def validate_scope_anchor_bindings(
-    query: str,
-    scope_anchors: list[str] | tuple[str, ...],
-) -> None:
-    """Require each claimed scope anchor to be explicitly present in the query.
-
-    ``label:value`` anchors bind through ``value``; untyped anchors bind through
-    their full text. Matching is deterministic across Unicode compatibility,
-    case, and whitespace differences, with ASCII identifier boundaries.
-    """
-    if not scope_anchors:
-        return
-    normalized_query = _normalized_scope_binding_text(str(query or ""))
-    if not normalized_query:
-        raise ValueError("scope anchors require a non-empty retrieval query")
-    for anchor in scope_anchors:
-        phrase = _scope_anchor_binding_phrase(str(anchor))
-        normalized_phrase = _normalized_scope_binding_text(phrase)
-        if not normalized_phrase or not any(character.isalnum() for character in normalized_phrase):
-            raise ValueError(f"--scope-anchor {anchor!r} has no bindable query text")
-        if not _contains_scope_binding(normalized_query, normalized_phrase):
-            raise ValueError(
-                f"--scope-anchor {anchor!r} is not explicitly bound to the retrieval query; "
-                f"include {phrase!r} in the query"
-            )
-
-
-def _read_json_object(path: Path) -> dict[str, Any]:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise IdempotencyConflictError(f"Existing JSON output is not a readable object: {path}") from exc
-    if not isinstance(payload, dict):
-        raise IdempotencyConflictError(f"Existing JSON output is not an object: {path}")
-    return payload
-
-
-def _atomic_write_json_object(path: Path, obj: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp_fd, temp_path_value = tempfile.mkstemp(
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-    )
-    temp_path = Path(temp_path_value)
-    try:
-        with os.fdopen(temp_fd, "w", encoding="utf-8", newline="\n") as handle:
-            json.dump(obj, handle, ensure_ascii=False, indent=2)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(str(temp_path), str(path))
-    except Exception:
-        if temp_path.exists():
-            temp_path.unlink()
-        raise
-
-
-def persist_idempotent_jsonl_record(
-    path: Path,
-    obj: dict[str, Any],
-    *,
-    id_field: str,
-    ignored_fields: frozenset[str] = frozenset({"created_at"}),
-    mirror_path: Path | None = None,
-) -> tuple[dict[str, Any], bool]:
-    """Persist one logical runtime record and reject ID/content conflicts.
-
-    Retries may generate a new timestamp, so fields in ``ignored_fields`` do
-    not participate in the semantic identity check. The first persisted object
-    remains canonical and is also used for an optional single-JSON mirror.
-    """
-    identity = obj.get(id_field)
-    if not isinstance(identity, str) or not identity.strip():
-        raise ValueError(f"{id_field} must be a non-empty string")
-    identity = identity.strip()
-
-    target = Path(path)
-    mirror = Path(mirror_path) if mirror_path is not None else None
-    if mirror is not None and mirror.resolve(strict=False) == target.resolve(strict=False):
-        raise IdempotencyConflictError(
-            f"JSON mirror path conflicts with the JSONL event log: {mirror}"
-        )
-
-    lock_targets = {target.resolve(strict=False): target}
-    if mirror is not None:
-        lock_targets[mirror.resolve(strict=False)] = mirror
-
-    with ExitStack() as stack:
-        for resolved in sorted(lock_targets, key=lambda item: str(item).casefold()):
-            stack.enter_context(bucket_lock(lock_targets[resolved]))
-
-        rows = read_jsonl(target)
-        matches = [row for row in rows if row.get(id_field) == identity]
-        requested_semantic = _semantic_json(obj, ignored_fields=ignored_fields)
-        for existing in matches:
-            if _semantic_json(existing, ignored_fields=ignored_fields) != requested_semantic:
-                raise IdempotencyConflictError(
-                    f"{id_field} '{identity}' is already associated with different content"
-                )
-
-        canonical = dict(matches[0]) if matches else dict(obj)
-        mirror_exists = bool(mirror and mirror.exists())
-        if mirror_exists and mirror is not None:
-            if not mirror.is_file():
-                raise IdempotencyConflictError(f"JSON output path is not a file: {mirror}")
-            existing_mirror = _read_json_object(mirror)
-            if _semantic_json(existing_mirror, ignored_fields=ignored_fields) != requested_semantic:
-                raise IdempotencyConflictError(
-                    f"JSON output path already contains different content: {mirror}"
-                )
-            if matches and existing_mirror != canonical:
-                raise IdempotencyConflictError(
-                    f"JSON output does not match the canonical {id_field} '{identity}': {mirror}"
-                )
-            if not matches:
-                canonical = existing_mirror
-
-        appended = not matches
-        if appended:
-            append_jsonl(target, canonical, lock_held=True)
-        if mirror is not None and not mirror_exists:
-            _atomic_write_json_object(mirror, canonical)
-
-    return canonical, appended
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -1147,35 +1081,56 @@ def write_index(ctx: RepoContext) -> None:
 # ==================== 新增：配置加载 ====================
 
 def load_config() -> dict[str, Any]:
-    """加载配置文件（config.json）。
+    """加载唯一配置源。
 
-    查找顺序：
-    1. 环境变量 `PERSONAL_KB_CONFIG`
-    2. 当前 skill 目录下的 `config.json`
-    3. 无；项目 Skill 配置是唯一默认配置
-
-    Returns:
-        配置字典，如果文件不存在则返回默认配置
+    `PERSONAL_KB_CONFIG` 是明确的配置选择；缺失或损坏时直接报错。
+    Skill 自带的 `config.json` 仅用于本地开发，公开发布包只提供
+    `config.example.json`，不会隐式读取其他机器上的历史路径。
     """
-    candidates: list[Path] = []
     env_config = os.environ.get("PERSONAL_KB_CONFIG")
-    if env_config:
-        candidates.append(Path(env_config).expanduser())
-    candidates.append(skill_root_dir() / "config.json")
+    config_path = Path(env_config).expanduser() if env_config else skill_root_dir() / "config.json"
+    if not config_path.exists():
+        if env_config:
+            raise PersonalKbConfigError(f"PERSONAL_KB_CONFIG 指向的文件不存在: {config_path}")
+        # 允许导入模块和单元测试使用显式 PERSONAL_KB_ROOT；真正访问数据时
+        # personal_kb_root_dir() 会给出缺失 storage.root 的可操作错误。
+        return {
+            "storage": {},
+            "runtime": {"mode": "normal"},
+            "challenge": {
+                "success_sample_rate": 0.10,
+                "max_adopted_entries": 3,
+                "critique_depth": 1,
+                "defer_success_samples": True,
+            },
+        }
+    try:
+        with config_path.open("r", encoding="utf-8-sig") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as exc:
+        raise PersonalKbConfigError(f"无法读取 Personal KB 配置 {config_path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise PersonalKbConfigError(f"Personal KB 配置必须是 JSON 对象: {config_path}")
+    return data
 
-    for config_path in candidates:
-        if not config_path.exists():
-            continue
-        try:
-            with config_path.open("r", encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError):
-            continue
 
-    # 默认配置
+def default_config() -> dict[str, Any]:
+    """Return a portable config template for new installations."""
     return {
         "storage": {
-            "root": str(personal_kb_root_dir()),
+            "root": "${PERSONAL_KB_ROOT}",
+            "records": "repos",
+            "retained_files": "retained-files",
+            "manifests": "manifests",
+            "runtime": "runtime",
+            "cache": "cache",
+        },
+        "runtime": {"mode": "normal"},
+        "challenge": {
+            "success_sample_rate": 0.10,
+            "max_adopted_entries": 3,
+            "critique_depth": 1,
+            "defer_success_samples": True,
         },
         "cleanup": {
             "auto_merge_mode": "ai",
@@ -1192,6 +1147,8 @@ def load_config() -> dict[str, Any]:
         },
         "search": {
             "expand_queries": True,
+            "expand_ip_addresses": True,
+            "expand_abbreviations": True,
             "include_archived_on_empty": True
         },
         "write": {
@@ -1242,7 +1199,7 @@ def should_replace_old_entry(old_entry: dict[str, Any], new_context: str) -> tup
 # ==================== 新增：查询展开函数 ====================
 
 def expand_query_variants(query: str) -> list[str]:
-    """生成不依赖具体项目的中英文查询变体。
+    """智能查询展开：生成多个查询变体。
 
     Args:
         query: 原始查询字符串
@@ -1270,8 +1227,31 @@ def expand_query_variants(query: str) -> list[str]:
         if en in query_lower:
             variants.append(query.replace(en, zh))
 
-    # 项目名、业务缩写、主机名和地址只能来自 references/synonyms.json、
-    # 当前 KB 记录或自动学习结果，不能硬编码在通用 Skill 中。
+    # 2. IP 地址展开
+    if "143" in query and "192.168" not in query:
+        variants.append(query.replace("143", "192.168.2.143"))
+        variants.append(query.replace("143", "10.0.2.143"))
+
+    if "174" in query and "192.168" not in query:
+        variants.append(query.replace("174", "192.168.2.174"))
+
+    if "175" in query and "192.168" not in query:
+        variants.append(query.replace("175", "192.168.2.175"))
+
+    # 3. 缩写展开
+    abbreviations = {
+        "dms": ["dms", "数据管理系统", "大屏"],
+        "led": ["led", "大屏"],
+        "gmos": ["gmos", "政务系统"]
+    }
+
+    for abbr, expansions in abbreviations.items():
+        if abbr in query_lower:
+            for exp in expansions:
+                if exp != abbr:
+                    variants.append(query.replace(abbr, exp))
+
+    # 4. 去重并返回
     return list(dict.fromkeys(variants))  # 保持顺序的去重
 
 

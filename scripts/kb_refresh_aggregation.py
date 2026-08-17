@@ -256,8 +256,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例：
-  kb_refresh_aggregation.py authentication                  # 刷新关键词聚合视图
-  kb_refresh_aggregation.py authentication --check-only     # 仅检查新鲜度
+  kb_refresh_aggregation.py 督办                  # 刷新"督办"聚合视图
+  kb_refresh_aggregation.py 督办 --check-only     # 仅检查新鲜度
   kb_refresh_aggregation.py --all                 # 刷新所有聚合视图
         """
     )

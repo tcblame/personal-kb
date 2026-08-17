@@ -1,19 +1,11 @@
 from __future__ import annotations
 
 import argparse
-import io
 import json
 import sys
 from pathlib import Path
 
 from kb_lib import ensure_branch_layout, resolve_context, write_index
-
-
-if sys.platform == "win32":
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
-    if hasattr(sys.stderr, "reconfigure"):
-        sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
 
 def main(argv: list[str]) -> int:
@@ -29,8 +21,10 @@ def main(argv: list[str]) -> int:
         repo_name_override=(args.repo.strip() or None),
         branch_override=(args.branch.strip() or None),
     )
+    ensure_branch_layout(ctx)
+
+    # 只在非只读模式下写入 index.json
     if not args.read_only:
-        ensure_branch_layout(ctx)
         write_index(ctx)
 
     payload = {

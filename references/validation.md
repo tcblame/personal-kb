@@ -10,34 +10,31 @@ After changing prompt policy, routing, lifecycle, scripts, or durable data:
 
 Core commands:
 
-```powershell
-$SkillRoot = '<absolute path to the installed personal-kb directory>'
-$Python = '<absolute path to a Python executable>'
-$QuickValidate = '<absolute path to skill-creator/scripts/quick_validate.py>'
-$env:PYTHONUTF8 = '1'
-$env:PYTHONIOENCODING = 'utf-8'
-$env:PYTHONPYCACHEPREFIX = Join-Path ([IO.Path]::GetTempPath()) 'personal-kb-pycache'
-New-Item -ItemType Directory -Path $env:PYTHONPYCACHEPREFIX -Force | Out-Null
-& $Python -m compileall -q "$SkillRoot\scripts" "$SkillRoot\backend"
-& $Python "$SkillRoot\scripts\kb_rag_context_test.py"
-& $Python "$SkillRoot\scripts\kb_outcome_event_test.py"
-& $Python "$SkillRoot\scripts\kb_audit_runtime_value_test.py"
-& $Python "$SkillRoot\scripts\kb_audit_codex_sessions_test.py"
-& $Python "$SkillRoot\scripts\kb_record_codex_effectiveness_test.py"
-& $Python "$SkillRoot\scripts\kb_eval_preflight_test.py"
-& $Python "$SkillRoot\scripts\kb_eval_preflight.py" `
-  --last-days 2 --strict
-& $Python "$SkillRoot\scripts\kb_p0_usage_test.py"
-& $Python "$SkillRoot\scripts\kb_session_brief_test.py"
-& $Python "$SkillRoot\scripts\kb_sensitive_scan_test.py"
-& $Python "$SkillRoot\scripts\kb_quality_gate_test.py"
-& $Python "$SkillRoot\scripts\kb_quality_gate.py" --keep-from 2026-07-01 --strict
-& $Python "$SkillRoot\scripts\kb_smoke_test.py" "$SkillRoot"
-& $Python $QuickValidate "$SkillRoot"
-git -C "$SkillRoot" diff --check -- .
-if ($LASTEXITCODE -notin @(0, 129)) {
-  throw 'git diff --check failed'
-}
+```bash
+python3 -m py_compile <skill-root>/scripts/*.py
+python3 <skill-root>/scripts/kb_rag_context_test.py
+python3 <skill-root>/scripts/kb_audit_codex_sessions_test.py
+python3 <skill-root>/scripts/kb_record_codex_effectiveness_test.py
+python3 <skill-root>/scripts/kb_storage_test.py
+python3 <skill-root>/scripts/kb_retain_file_test.py
+python3 <skill-root>/scripts/kb_challenge_test.py
+python3 <skill-root>/scripts/kb_eval_preflight_test.py
+# 无历史窗口时运行确定性的策略/路由门禁；当前环境没有可回放主会话时，
+# 不要把空历史窗口误判为策略回归。
+python3 <skill-root>/scripts/kb_eval_preflight.py \
+  --routing-only --strict
+# RAG 运行时隔离检查（不依赖最近主会话窗口）：
+python3 <skill-root>/scripts/kb_eval_preflight.py \
+  --run-rag --json
+python3 <skill-root>/scripts/kb_p0_usage_test.py
+python3 <skill-root>/scripts/kb_session_brief_test.py
+python3 <skill-root>/scripts/kb_sensitive_scan_test.py
+python3 <skill-root>/scripts/kb_quality_gate_test.py
+python3 <skill-root>/scripts/kb_quality_gate.py --keep-from 2026-07-01 --strict
+python3 <skill-root>/scripts/kb_smoke_test.py <skill-root>
+python3 <skill-root>/scripts/kb_eval.py release-check
+python3 <skill-creator-root>/scripts/quick_validate.py <skill-root>
+git diff --check
 ```
 
 Required regression assertions:
@@ -51,10 +48,14 @@ Required regression assertions:
 - Successful closeout is silent; locate does not heat; decide/fix/write do; brief IDs never heat.
 - Parameter, corruption, lock, unsafe-routing, and write failures remain actionable and non-zero.
 - Ordinary subagents do not invoke KB.
+- A multi-topic request is split before retrieval; each history-dependent topic has an independent initial RAG budget, while the parent still closes out once.
+- `更新 ccs` resolves the durable `ccs = cc-switch` mapping and recalls the verified safe update entry instead of searching for a `ccs` executable.
+- Safety-critical `ccs` mappings and update/restart commands remain in a mandatory project instruction section, outside optional KB policy, and the project prompt requires verified parent hints before dispatching a history-dependent worker.
 - Broad parent retrieval routes to one read-only KB scout; the scout cannot write, heat, or close out; the parent reuses the returned brief without a duplicate RAG.
 - Every RAG output has an opaque `retrieval_id`; delegated IDs link only to the declared parent closeout and orphan/duplicate IDs remain visible.
-- Every successful RAG persists one strict retrieval receipt before stdout; repeated scope anchors and an optional atomic JSON mirror preserve the same canonical receipt.
-- Retrieval and outcome IDs are idempotent, conflicting reuse fails, and an outcome cannot name an entry outside its linked receipt.
-- Outcome fields use controlled recurrence/verdict values, retrieval surfaces prior outcome feedback, and runtime-value audit reports acceptance and recurrence without mutating durable records.
 - Policy-simulator inputs and frozen gold remain separate; `--strict` runs trusted RAG against a temporary current-KB copy and checks production/snapshot hashes.
 - Historical replay is a behavior shadow only. Multi-message turns and possible duplicates without lifecycle state are excluded from call-efficiency comparison; unknown execution status is reported, not guessed as success.
+- Runtime and cache path overrides resolve below one canonical root; no hidden work-directory fallback is accepted.
+- Full evidence retention keeps bytes outside `kb.jsonl`, deduplicates by hash, and preserves credential-bearing files verbatim under the private local data root.
+- Challenge proposals are bounded, proposal-only, non-recursive, and do not change the durable KB until the primary conversation resolves them.
+- The public release check excludes real data, manifests, runtime logs, local config, absolute paths, and credential-shaped content.

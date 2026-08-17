@@ -218,9 +218,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例：
-  kb_aggregate.py authentication                    # 生成关键词聚合视图
-  kb_aggregate.py authentication --force            # 强制重新生成
-  kb_aggregate.py authentication --dry-run          # 预览不保存
+  kb_aggregate.py 督办                    # 生成"督办"聚合视图
+  kb_aggregate.py 督办 --force            # 强制重新生成
+  kb_aggregate.py 督办 --dry-run          # 预览不保存
         """
     )
 

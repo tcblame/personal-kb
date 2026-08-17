@@ -9,8 +9,8 @@ KB 迁移脚本：将错位的 KB 条目迁移到正确的项目桶
         --confidence <0-1> --reason "<原因>" [--from-repo <repo>] [--from-branch <branch>] [--dry-run]
 
 示例：
-    kb_migrate.py abc12345 --to-repo project-beta/billing-api --to-branch release \\
-        --confidence 0.95 --reason "标题和 tags 均指向目标项目"
+    kb_migrate.py abc12345 --to-repo example-project-a --to-branch example-branch-a/dev-gch \\
+        --confidence 0.95 --reason "标题和tags均为example-project-a项目"
 """
 from __future__ import annotations
 
@@ -144,8 +144,8 @@ def main(argv: list[str]) -> int:
         description="迁移 KB 条目到正确的项目桶（只执行迁移，不做判断）"
     )
     parser.add_argument("entry_id", help="条目 ID（8字符 hex）")
-    parser.add_argument("--to-repo", required=True, help="目标项目名（如 project-beta/billing-api）")
-    parser.add_argument("--to-branch", required=True, help="目标分支路径（如 release）")
+    parser.add_argument("--to-repo", required=True, help="目标项目名（如 example-project-a）")
+    parser.add_argument("--to-branch", required=True, help="目标分支路径（如 example-branch-a/dev-gch）")
     parser.add_argument(
         "--confidence",
         type=float,
@@ -155,7 +155,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument(
         "--reason",
         default="AI判断错位",
-        help="迁移原因（如：标题和 tags 均指向目标项目）",
+        help="迁移原因（如：标题和tags均为example-project-a项目）",
     )
     parser.add_argument(
         "--from-repo",

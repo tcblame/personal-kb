@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import collections
 import json
 import re
@@ -11,8 +12,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from kb_codex_tool_calls import custom_exec_commands, custom_exec_is_parseable
-from kb_lib import kb_base_dir
+from kb_lib import runtime_file
 
 
 KB_CALL_PATTERNS = {
@@ -21,6 +21,13 @@ KB_CALL_PATTERNS = {
     "kb_closeout": "kb_closeout.py",
     "kb_add": "kb_add.py",
     "kb_update": "kb_update.py",
+}
+KB_WRAPPER_COMMANDS = {
+    "retrieve": "kb_rag_context",
+    "search": "kb_search",
+    "closeout": "kb_closeout",
+    "remember": "kb_add",
+    "update": "kb_update",
 }
 
 FORBID_KB_RE = re.compile(
@@ -35,14 +42,28 @@ MEMORY_NEEDED_RE = re.compile(
     re.I,
 )
 RUNTIME_AUDIT_RE = re.compile(
-    r"(?:personal-kb|\bKB\b|知识库).{0,24}(?:运行|runtime|会话|session|效果|质量|审计|telemetry)|"
-    r"(?:运行|runtime|会话|session|效果|质量|审计|telemetry).{0,24}(?:personal-kb|\bKB\b|知识库)",
+    r"(?:kbskill|personal-kb|\bKB\b|知识库).{0,40}(?:优化|效果|审计|运行|runtime|会话|session|质量|telemetry|对话记录)|"
+    r"(?:优化|效果|审计|运行|runtime|会话|session|质量|telemetry|对话记录).{0,40}(?:kbskill|personal-kb|\bKB\b|知识库)",
     re.I,
 )
-EXIT_RE = re.compile(r"(?:Process exited with code\s+|Exit code:\s*)(-?\d+)")
+EXIT_RE = re.compile(r"Process exited with code\s+(-?\d+)")
 RAG_TEXT_RETRIEVAL_ID_RE = re.compile(r'retrieval_id="([A-Za-z0-9._:-]+)"')
 RETRIEVAL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
-PYTHON_EXECUTABLE_RE = re.compile(r"(?:python(?:\d+(?:\.\d+)?)?|py)(?:\.exe)?", re.I)
+PYTHON_EXECUTABLE_RE = re.compile(r"python(?:\d+(?:\.\d+)?)?|py", re.I)
+CONTEXT_PREFIXES = (
+    "# AGENTS.md instructions",
+    "<INSTRUCTIONS>",
+    "<environment_context>",
+    "<permissions instructions>",
+    "<collaboration_mode>",
+    "<skills_instructions>",
+    "<subagent_notification>",
+    "<turn_aborted>",
+)
+CUSTOM_EXEC_CMD_RE = re.compile(
+    r"(?:[\"']cmd[\"']|\bcmd)\s*:\s*(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)",
+    re.S,
+)
 UUID_RE = re.compile(
     r"(?i)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
 )
@@ -67,6 +88,17 @@ def _output_text(value: Any) -> str:
             if key in value:
                 return _output_text(value.get(key))
     return ""
+
+
+def _user_response_text(content: Any) -> str:
+    parts: list[str] = []
+    for item in _as_list(content):
+        text = _output_text(item)
+        if text.lstrip().startswith(CONTEXT_PREFIXES):
+            continue
+        if text.strip():
+            parts.append(text)
+    return "\n".join(parts)
 
 
 def _execution_success(output: str) -> bool | None:
@@ -106,10 +138,29 @@ def _json_dicts_from_output(output: str) -> list[dict[str, Any]]:
     return rows
 
 
+def _nested_output_texts(output: str) -> list[str]:
+    texts: list[str] = []
+    queue = [output or ""]
+    seen: set[str] = set()
+    while queue:
+        text = queue.pop(0)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        texts.append(text)
+        for payload in _json_dicts_from_output(text):
+            for key in ("output", "text", "content"):
+                nested = _output_text(payload.get(key))
+                if nested and nested not in seen:
+                    queue.append(nested)
+    return texts
+
+
 def _retrieval_id_from_output(output: str) -> str:
     header_lines = [
         line.strip()
-        for line in (output or "").splitlines()
+        for text in _nested_output_texts(output)
+        for line in text.splitlines()
         if line.strip().startswith("KB_RAG_CONTEXT ")
     ]
     matches = [
@@ -117,23 +168,51 @@ def _retrieval_id_from_output(output: str) -> str:
     ]
     if matches and RETRIEVAL_ID_RE.fullmatch(matches[-1]):
         return matches[-1]
-    for payload in _json_dicts_from_output(output):
-        if payload.get("mode") != "read_only_rag_context":
-            continue
-        retrieval_id = str(payload.get("retrieval_id") or "").strip()
-        if RETRIEVAL_ID_RE.fullmatch(retrieval_id):
-            return retrieval_id
+    for text in _nested_output_texts(output):
+        for payload in _json_dicts_from_output(text):
+            if payload.get("mode") != "read_only_rag_context":
+                continue
+            retrieval_id = str(payload.get("retrieval_id") or "").strip()
+            if RETRIEVAL_ID_RE.fullmatch(retrieval_id):
+                return retrieval_id
+    return ""
+
+
+def _decode_js_string(literal: str) -> str:
+    if literal.startswith('"'):
+        try:
+            value = json.loads(literal)
+            return str(value) if isinstance(value, str) else ""
+        except json.JSONDecodeError:
+            return ""
+    if literal.startswith("'"):
+        try:
+            value = ast.literal_eval(literal)
+            return str(value) if isinstance(value, str) else ""
+        except (SyntaxError, ValueError):
+            return ""
+    if literal.startswith("`") and literal.endswith("`"):
+        value = literal[1:-1]
+        if "${" in value:
+            return ""
+        return value.replace(r"\`", "`").replace(r"\n", "\n").replace(r"\r", "\r").replace(r"\t", "\t")
     return ""
 
 
 def _custom_exec_commands(source: str) -> list[str]:
-    return custom_exec_commands(source)
+    if "tools.exec_command" not in (source or ""):
+        return []
+    return [
+        command
+        for match in CUSTOM_EXEC_CMD_RE.finditer(source)
+        if (command := _decode_js_string(match.group(1)))
+    ]
 
 
 def _call_commands(payload: dict[str, Any]) -> tuple[list[str], str]:
     if payload.get("type") == "function_call":
         args = _json_loads(str(payload.get("arguments") or "{}"))
-        command = str(args.get("cmd") or args.get("command") or "")
+        command = str(args.get("cmd") or "")
         return ([command] if command else []), "function_call"
     if payload.get("type") == "custom_tool_call" and payload.get("name") == "exec":
         return _custom_exec_commands(str(payload.get("input") or "")), "custom_tool_call_exec"
@@ -177,13 +256,28 @@ def _nested_script(command: str, script_name: str) -> bool:
     return any(re.search(pattern, command, re.I | re.S) for pattern in patterns)
 
 
+def _wrapper_invocation(tokens: list[str]) -> tuple[str, int] | None:
+    if not _direct_script(tokens, "kb.py"):
+        return None
+    index = _script_index(tokens, "kb.py")
+    if index is None or index + 1 >= len(tokens):
+        return None
+    command = tokens[index + 1]
+    key = KB_WRAPPER_COMMANDS.get(command)
+    return (key, index + 1) if key else None
+
+
 def _detected_scripts(command: str) -> list[str]:
     tokens = _parse_cli_tokens(command)
-    return [
+    detected = [
         key
         for key, script_name in KB_CALL_PATTERNS.items()
         if _direct_script(tokens, script_name) or (script_name in command and _nested_script(command, script_name))
     ]
+    wrapped = _wrapper_invocation(tokens)
+    if wrapped and wrapped[0] not in detected:
+        detected.append(wrapped[0])
+    return detected
 
 
 def _as_list(value: Any) -> list[Any]:
@@ -280,14 +374,23 @@ def _script_index(tokens: list[str], script_name: str) -> int | None:
 
 def _is_help_invocation(tokens: list[str], script_name: str) -> bool:
     index = _script_index(tokens, script_name)
-    return index is not None and any(token in {"-h", "--help"} for token in tokens[index + 1 :])
+    if index is not None:
+        return any(token in {"-h", "--help"} for token in tokens[index + 1 :])
+    wrapped = _wrapper_invocation(tokens)
+    expected_key = next((key for key, value in KB_CALL_PATTERNS.items() if value == script_name), "")
+    return bool(wrapped and wrapped[0] == expected_key and any(token in {"-h", "--help"} for token in tokens[wrapped[1] + 1 :]))
 
 
 def _rag_query(tokens: list[str], script_name: str) -> str:
     index = _script_index(tokens, script_name)
-    if index is None or index + 1 >= len(tokens):
+    if index is not None and index + 1 < len(tokens):
+        candidate = tokens[index + 1]
+        return candidate if candidate and not candidate.startswith("-") else ""
+    wrapped = _wrapper_invocation(tokens)
+    expected_key = next((key for key, value in KB_CALL_PATTERNS.items() if value == script_name), "")
+    if not wrapped or wrapped[0] != expected_key or wrapped[1] + 1 >= len(tokens):
         return ""
-    candidate = tokens[index + 1]
+    candidate = tokens[wrapped[1] + 1]
     return candidate if candidate and not candidate.startswith("-") else ""
 
 
@@ -470,22 +573,28 @@ def _parse_session(path: Path) -> dict[str, Any]:
             current_turn_id = _turn_id(payload, current_turn_id)
         if obj.get("type") == "event_msg" and payload.get("type") == "user_message":
             user_msgs.append(str(payload.get("message") or payload.get("text") or ""))
+        if (
+            obj.get("type") == "response_item"
+            and payload.get("type") == "message"
+            and payload.get("role") == "user"
+        ):
+            user_text = _user_response_text(payload.get("content"))
+            if user_text.strip():
+                user_msgs.append(user_text)
         if obj.get("type") == "response_item" and payload.get("type") in {"function_call_output", "custom_tool_call_output"}:
             call_id = str(payload.get("call_id") or "")
             if call_id:
                 output_by_call_id[call_id] = _output_text(payload.get("output"))
         if obj.get("type") == "response_item" and payload.get("type") == "function_call":
             args = _json_loads(str(payload.get("arguments") or "{}"))
-            if payload.get("name") in {"exec", "exec_command", "shell_command"} or any(
-                key in args for key in ("cmd", "command")
-            ):
+            if payload.get("name") in {"exec", "exec_command"} or "cmd" in args:
                 call_rows.append({
                     "row": obj,
                     "turn_id": _turn_id(payload, current_turn_id),
                     "sequence": len(call_rows),
                 })
                 source_format_counts["function_call"] += 1
-                if not str(args.get("cmd") or args.get("command") or ""):
+                if not str(args.get("cmd") or ""):
                     unparsed_exec_count += 1
         if obj.get("type") == "response_item" and payload.get("type") == "custom_tool_call" and payload.get("name") == "exec":
             call_rows.append({
@@ -494,7 +603,7 @@ def _parse_session(path: Path) -> dict[str, Any]:
                 "sequence": len(call_rows),
             })
             source_format_counts["custom_tool_call_exec"] += 1
-            if not custom_exec_is_parseable(str(payload.get("input") or "")):
+            if not _custom_exec_commands(str(payload.get("input") or "")):
                 unparsed_exec_count += 1
 
     detected_kb_call_count = 0
@@ -648,6 +757,15 @@ def _closeout_has_action(row: dict[str, Any]) -> bool:
     )
 
 
+def _closeout_has_integrity_gap(row: dict[str, Any]) -> bool:
+    linked_missing = (
+        _as_int(row.get("rag_calls")) > 0
+        and not bool(_as_list(row.get("linked_retrieval_ids")))
+    )
+    brief_missing = "session_brief_hit" not in row or "session_brief_help" not in row
+    return linked_missing or brief_missing
+
+
 def _required_heat_ids(row: dict[str, Any]) -> set[str]:
     session_brief_ids = {
         str(entry_id) for entry_id in _as_list(row.get("session_brief_used_entry_ids"))
@@ -793,12 +911,42 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         s for s in sessions
         if s["is_main"]
         and not s["forbid_kb"]
+        and not s["runtime_audit"]
         and (s["explicit_kb"] or s["memory_needed"])
         and not s.get("effective_rag_or_search", s["rag_or_search"])
     ]
     rag_no_closeout = [
         s for s in sessions
         if s.get("effective_rag_calls_without_closeout", s["rag_calls_without_closeout"]) > 0
+        and not s["runtime_audit"]
+        and not s["forbid_kb"]
+    ]
+    main_expected_rag = [
+        s for s in sessions
+        if s["is_main"]
+        and not s["forbid_kb"]
+        and not s["runtime_audit"]
+        and (s["explicit_kb"] or s["memory_needed"])
+    ]
+    main_expected_and_used_rag = [
+        s for s in main_expected_rag
+        if s.get("effective_rag_or_search", s["rag_or_search"]) > 0
+    ]
+    main_used_rag = [
+        s for s in sessions
+        if s["is_main"]
+        and not s["forbid_kb"]
+        and not s["runtime_audit"]
+        and s.get("effective_rag_or_search", s["rag_or_search"]) > 0
+    ]
+    main_used_without_closeout = [
+        s for s in main_used_rag
+        if _as_int(s["counters"].get("kb_closeout")) <= 0
+    ]
+    main_with_closeout = [
+        s for s in sessions
+        if s["is_main"]
+        and _as_int(s["counters"].get("kb_closeout")) > 0
     ]
 
     closeout_issues = {
@@ -822,6 +970,16 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             )
             for r in closeouts
         ),
+        "linked_retrieval_id_missing": sum(
+            _as_int(r.get("rag_calls")) > 0
+            and not bool(_as_list(r.get("linked_retrieval_ids")))
+            for r in closeouts
+        ),
+        "session_brief_telemetry_missing": sum(
+            "session_brief_hit" not in r or "session_brief_help" not in r
+            for r in closeouts
+        ),
+        "closeout_integrity_missing": sum(_closeout_has_integrity_gap(r) for r in closeouts),
     }
 
     call_totals: collections.Counter[str] = collections.Counter()
@@ -853,6 +1011,11 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "subagent_sessions": count(lambda s: s["is_subagent"]),
         "main_missed_rag_sessions": len(missed_main),
         "forbidden_kb_violation_sessions": len(violations),
+        "main_expected_rag_sessions": len(main_expected_rag),
+        "main_expected_and_used_rag_sessions": len(main_expected_and_used_rag),
+        "main_used_sessions": len(main_used_rag),
+        "main_used_without_closeout_sessions": len(main_used_without_closeout),
+        "main_with_closeout_sessions": len(main_with_closeout),
         "rag_without_closeout_sessions": len(rag_no_closeout),
         **parent_scout_stats,
         "call_totals": dict(call_totals),
@@ -872,6 +1035,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "examples": {
             "forbidden_kb_violations": violations[: args.examples],
             "main_missed_rag": missed_main[: args.examples],
+            "main_used_without_closeout": main_used_without_closeout[: args.examples],
             "rag_without_closeout": rag_no_closeout[: args.examples],
         },
     }
@@ -883,6 +1047,12 @@ def _print_text(report: dict[str, Any]) -> None:
     print(f"- kb_activity_sessions: {report['kb_activity_sessions']}")
     print(f"- main_sessions: {report['main_sessions']}")
     print(f"- main_missed_rag_sessions: {report['main_missed_rag_sessions']}")
+    print(
+        f"- main_expected_rag_sessions: {report['main_expected_rag_sessions']} "
+        f"(used {report['main_expected_and_used_rag_sessions']})"
+    )
+    print(f"- main_used_without_closeout_sessions: {report['main_used_without_closeout_sessions']}")
+    print(f"- main_with_closeout_sessions: {report['main_with_closeout_sessions']}")
     print(f"- forbidden_kb_violation_sessions: {report['forbidden_kb_violation_sessions']}")
     print(f"- rag_without_closeout_sessions: {report['rag_without_closeout_sessions']}")
     print(f"- call_totals: {report['call_totals']}")
@@ -909,7 +1079,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--sessions-root", default="~/.codex/sessions", help="Codex sessions root")
     parser.add_argument("--date", action="append", default=[], help="Date to audit, YYYY-MM-DD; repeatable")
     parser.add_argument("--last-days", type=int, default=2, help="Audit today and previous N-1 days when --date is omitted")
-    parser.add_argument("--closeout", default=str(kb_base_dir() / "_meta" / "closeout.jsonl"))
+    parser.add_argument("--closeout", default=str(runtime_file("closeout.jsonl")))
     parser.add_argument("--examples", type=int, default=5, help="Examples per issue type")
     parser.add_argument("--json", action="store_true", help="Print JSON")
     args = parser.parse_args(argv)
