@@ -15,8 +15,13 @@ python3 <skill-root>/scripts/kb_audit_codex_sessions.py --last-days 2
 python3 <skill-root>/scripts/kb_record_codex_effectiveness.py \
   --current-cutoff YYYY-MM-DD --strict-quality
 python3 <skill-root>/scripts/kb_audit_runtime_value.py --last-days 2
-python3 <skill-root>/scripts/kb_eval.py audit --last-days 2
+python3 <skill-root>/scripts/kb_eval.py audit-runtime --last-days 2
 ```
+
+`kb_eval_preflight.py` is a deterministic policy simulator. Its routing accuracy and
+temporary-copy retrieval checks are not live Codex adoption, closeout completion,
+or final task benefit. Measure those separately with runtime closeouts, real session
+audits, and human outcome review.
 
 Identity and pairing rules:
 
@@ -37,6 +42,11 @@ Metric semantics:
 - Do not count `kb_*.py --help` as retrieval, maintenance, or closeout usage.
 - Count per-entry adoption as confirmed only when actual closeout JSON exposes successful IDs; keep silent-command `--used-*` values as requested/unconfirmed and report session briefs separately.
 - Treat summaries generated before the current window as stale until rebuilt.
+- Treat `main_missed_rag_sessions` as auditor candidates, not human ground truth.
+  The canonical small review sample is
+  `docs/req/001-personal-kb-taxonomy/evals/runtime-session-human-labels.json`;
+  report confirmed misses, confirmed false positives, and unreviewed candidates
+  separately.
 
 Keep main-session metrics separate from ordinary subagent behavior. Do not expose routine telemetry in normal answers; surface actionable findings only when the user asks for an audit.
 

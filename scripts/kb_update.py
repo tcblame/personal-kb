@@ -11,6 +11,7 @@ from typing import Any
 
 import kb_adoption
 import kb_evidence
+import kb_record_validation
 from kb_lib import JsonlSafetyError, bucket_lock, find_entry, generate_entry_id, json_object_from_b64, kb_base_dir, now_iso, read_jsonl, resolve_context, validate_entry_fields, write_index, _rewrite_jsonl
 from kb_sensitive_scan import sensitive_findings
 
@@ -333,13 +334,13 @@ def _main(argv: list[str]) -> int:
                 )
                 return 4
 
+            workspace = Path(str(entry.get("workspace_dir") or ctx.workspace_dir))
             try:
                 schema_version = int(entry.get("schema_version") or 1)
             except (TypeError, ValueError):
                 schema_version = 1
             needs_initial_snapshot = schema_version < 2 or "evidence_snapshots" not in entry
             if args.refresh_evidence or needs_initial_snapshot:
-                workspace = Path(str(entry.get("workspace_dir") or ctx.workspace_dir))
                 entry["schema_version"] = 2
                 entry["evidence_snapshots"] = kb_evidence.capture_evidence_snapshots(entry, workspace)
                 verification = kb_evidence.verify_entry_evidence(entry, workspace)
@@ -351,6 +352,17 @@ def _main(argv: list[str]) -> int:
                 else:
                     entry.pop("verified_at", None)
                     entry["status"] = "draft_pending_evidence"
+
+            quality_errors = kb_record_validation.strict_record_errors(
+                entry,
+                workspace_dir=workspace,
+                require_fresh_snapshot=True,
+            )
+            if quality_errors:
+                sys.stderr.write("Entry quality validation failed:\n")
+                for error in quality_errors:
+                    sys.stderr.write(f"- {error}\n")
+                return 3
 
             entry["updated_ts"] = now_iso()
             entry["record_rev"] = kb_evidence.canonical_entry_revision(entry)

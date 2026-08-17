@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import kb_evidence
+import kb_record_validation
 from kb_lib import JsonlSafetyError, ensure_jsonl_safe, kb_base_dir
 
 
@@ -21,14 +22,6 @@ def _source_exists(value: str, *, workspace_root: Path) -> bool:
     if not path.is_absolute():
         path = workspace_root / path
     return path.exists()
-
-
-def _valid_evidence_ref(value: Any) -> bool:
-    return (
-        isinstance(value, dict)
-        and str(value.get("type") or "") in {"git_commit", "conversation", "retained"}
-        and bool(str(value.get("value") or "").strip())
-    )
 
 
 def _schema_version(value: Any) -> int:
@@ -125,6 +118,13 @@ def audit(root: Path, *, keep_from: str) -> dict[str, Any]:
             freshness_counts[freshness_state] = freshness_counts.get(freshness_state, 0) + 1
             if status not in {"draft_pending_evidence", "superseded", "archived"} and freshness_state != "fresh":
                 violations.append({"entry": prefix, "issue": f"evidence freshness is {freshness_state}"})
+            entry_workspace = Path(str(entry.get("workspace_dir") or workspace_root)).expanduser()
+            for issue in kb_record_validation.strict_record_errors(
+                entry,
+                workspace_dir=entry_workspace,
+                require_fresh_snapshot=True,
+            ):
+                violations.append({"entry": prefix, "issue": issue})
         else:
             legacy_records += 1
 
@@ -140,9 +140,10 @@ def audit(root: Path, *, keep_from: str) -> dict[str, Any]:
             elif _source_exists(source, workspace_root=workspace_root):
                 source_resolved += 1
                 resolved_for_entry += 1
-        valid_refs = [ref for ref in refs if _valid_evidence_ref(ref)]
-        if refs and len(valid_refs) != len(refs):
-            violations.append({"entry": prefix, "issue": "invalid evidence_refs structure"})
+        ref_errors = kb_evidence.validate_evidence_refs(refs)
+        valid_refs = refs if not ref_errors else []
+        for issue in ref_errors:
+            violations.append({"entry": prefix, "issue": issue})
         if resolved_for_entry == 0 and not valid_refs:
             violations.append({"entry": prefix, "issue": "no resolvable evidence for record"})
 

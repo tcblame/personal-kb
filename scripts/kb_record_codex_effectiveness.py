@@ -18,23 +18,12 @@ if sys.platform == "win32" and hasattr(sys.stdout, "buffer"):
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace", line_buffering=True)
 
 from kb_lib import kb_base_dir, now_iso, runtime_file
+from kb_runtime import attach_runtime_scope
+import kb_command_contract as command_contract
 
 
-KB_SCRIPT_PATTERNS = {
-    "kb_rag_context": "kb_rag_context.py",
-    "kb_search": "kb_search.py",
-    "kb_closeout": "kb_closeout.py",
-    "kb_add": "kb_add.py",
-    "kb_update": "kb_update.py",
-}
-
-KB_WRAPPER_COMMANDS = {
-    "retrieve": "kb_rag_context",
-    "search": "kb_search",
-    "closeout": "kb_closeout",
-    "remember": "kb_add",
-    "update": "kb_update",
-}
+KB_SCRIPT_PATTERNS = command_contract.KB_SCRIPT_PATTERNS
+KB_WRAPPER_COMMANDS = command_contract.KB_WRAPPER_COMMANDS
 
 CURRENT_WORKFLOW_CUTOFF = "2026-07-03"
 
@@ -87,7 +76,7 @@ EXIT_RE = re.compile(r"Process exited with code\s+(-?\d+)")
 RAG_TEXT_HITS_RE = re.compile(r"\bhits=(\d+)(?=\s|$)")
 RAG_TEXT_RETRIEVAL_ID_RE = re.compile(r'retrieval_id="([A-Za-z0-9._:-]+)"')
 RETRIEVAL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
-PYTHON_EXECUTABLE_RE = re.compile(r"python(?:\d+(?:\.\d+)?)?|py", re.I)
+PYTHON_EXECUTABLE_RE = command_contract.PYTHON_EXECUTABLE_RE
 CUSTOM_EXEC_CMD_RE = re.compile(
     r"(?:[\"']cmd[\"']|\bcmd)\s*:\s*(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)",
     re.S,
@@ -637,15 +626,11 @@ def _parse_retrieval_id_from_output(output: str) -> str:
 
 
 def _parse_cli_tokens(command: str) -> list[str]:
-    try:
-        return shlex.split(command)
-    except ValueError:
-        return command.split()
+    return command_contract.parse_cli_tokens(command)
 
 
 def _token_basename(token: str) -> str:
-    clean = str(token or "").strip().strip("\"'")
-    return Path(clean).name
+    return command_contract.token_basename(token)
 
 
 def _is_python_executable(token: str) -> bool:
@@ -653,23 +638,7 @@ def _is_python_executable(token: str) -> bool:
 
 
 def _direct_script_index(tokens: list[str], script_name: str) -> int | None:
-    for index, token in enumerate(tokens):
-        if _token_basename(token) != script_name:
-            continue
-        if index == 0:
-            return index
-
-        previous = tokens[index - 1]
-        if previous in {"&&", ";", "||", "|"}:
-            return index
-
-        cursor = index - 1
-        while cursor >= 0 and tokens[cursor].startswith("-") and tokens[cursor] != "-":
-            cursor -= 1
-        if cursor >= 0 and _is_python_executable(tokens[cursor]):
-            return index
-
-    return None
+    return command_contract.direct_script_index(tokens, script_name)
 
 
 def _nested_python_invocation(command: str, script_name: str) -> bool:
@@ -682,12 +651,7 @@ def _nested_python_invocation(command: str, script_name: str) -> bool:
 
 
 def _wrapper_invocation(tokens: list[str]) -> tuple[str, int] | None:
-    wrapper_index = _direct_script_index(tokens, "kb.py")
-    if wrapper_index is None or wrapper_index + 1 >= len(tokens):
-        return None
-    command_index = wrapper_index + 1
-    script_key = KB_WRAPPER_COMMANDS.get(tokens[command_index])
-    return (script_key, command_index) if script_key else None
+    return command_contract.wrapper_invocation(tokens)
 
 
 def _detect_kb_script(command: str, tokens: list[str]) -> tuple[str, str]:
@@ -704,22 +668,11 @@ def _detect_kb_script(command: str, tokens: list[str]) -> tuple[str, str]:
 
 
 def _script_index(tokens: list[str], script_name: str) -> int | None:
-    direct_index = _direct_script_index(tokens, script_name)
-    if direct_index is not None:
-        return direct_index
-    expected_key = next(
-        (key for key, value in KB_SCRIPT_PATTERNS.items() if value == script_name),
-        "",
-    )
-    wrapped = _wrapper_invocation(tokens)
-    if wrapped and wrapped[0] == expected_key:
-        return wrapped[1]
-    return None
+    return command_contract.script_index(tokens, script_name)
 
 
 def _is_help_invocation(tokens: list[str], script_name: str) -> bool:
-    index = _script_index(tokens, script_name)
-    return index is not None and any(token in {"-h", "--help"} for token in tokens[index + 1 :])
+    return command_contract.is_help_invocation(tokens, script_name)
 
 
 def _script_name(script_key: str) -> str:
@@ -727,24 +680,11 @@ def _script_name(script_key: str) -> str:
 
 
 def _first_positional_after_script(tokens: list[str], script_name: str) -> str:
-    index = _script_index(tokens, script_name)
-    if index is None:
-        return ""
-    for token in tokens[index + 1 :]:
-        if token.startswith("--"):
-            break
-        return token
-    return ""
+    return command_contract.first_positional(tokens, script_name)
 
 
 def _parse_repeated_flag(tokens: list[str], flag: str) -> list[str]:
-    values: list[str] = []
-    for index, token in enumerate(tokens):
-        if token == flag and index + 1 < len(tokens):
-            values.append(tokens[index + 1])
-        elif token.startswith(f"{flag}="):
-            values.append(token.split("=", 1)[1])
-    return values
+    return command_contract.repeated_flag_values(tokens, flag)
 
 
 def _parse_optional_flag(tokens: list[str], flag: str, default: str = "") -> str:
@@ -2068,7 +2008,8 @@ def rebuild_logs(
     rows = scoped_rows
     if dedupe_session_id:
         rows, dedupe_stats = _dedupe_rows_by_session_id(scoped_rows)
-    rows = [dict(row) for row in rows]
+    rows = [attach_runtime_scope(dict(row)) for row in rows]
+    legacy_rows = [attach_runtime_scope(dict(row)) for row in legacy_rows]
     parent_scout_stats = _reconcile_parent_scout_links(rows)
 
     summary = _summary_from_rows(rows)
@@ -2085,6 +2026,7 @@ def rebuild_logs(
             **dedupe_stats,
         }
     )
+    summary = attach_runtime_scope(summary)
 
     _write_jsonl(log_path(base_dir), rows)
     if include_legacy:
@@ -2094,7 +2036,7 @@ def rebuild_logs(
     summary_path(base_dir).write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     _save_state(state_path(base_dir), state)
 
-    return {
+    return attach_runtime_scope({
         "analysis_ts": now_iso(),
         "event": "kb_codex_effectiveness_rebuild",
         "sessions_root": str(sessions_root),
@@ -2108,7 +2050,7 @@ def rebuild_logs(
         "legacy_log_path": str(legacy_log_path(base_dir)),
         "summary_path": str(summary_path(base_dir)),
         "summary": summary,
-    }
+    })
 
 
 def _quality_failures(

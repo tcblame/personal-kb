@@ -14,6 +14,7 @@ if sys.platform == "win32" and hasattr(sys.stdout, "buffer"):
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace", line_buffering=True)
 
 from kb_lib import kb_base_dir, read_jsonl, runtime_file
+from kb_runtime import is_test_event
 
 
 def default_closeout_path(base_dir: Path | None = None) -> Path:
@@ -83,12 +84,18 @@ def _row_sample(rows: list[dict[str, Any]], predicate, limit: int = 6) -> list[s
     return samples
 
 
-def build_report(*, path: Path, last_days: int) -> dict[str, Any]:
+def build_report(
+    *,
+    path: Path,
+    last_days: int,
+    include_test: bool = False,
+) -> dict[str, Any]:
     rows = read_jsonl(path) if path.exists() else []
     since = datetime.now(timezone.utc) - timedelta(days=max(1, last_days))
 
     recent_rows: list[dict[str, Any]] = []
     skipped_invalid_ts = 0
+    excluded_test_rows = 0
     for row in rows:
         if row.get("event") != "kb_closeout":
             continue
@@ -97,6 +104,9 @@ def build_report(*, path: Path, last_days: int) -> dict[str, Any]:
             skipped_invalid_ts += 1
             continue
         if ts < since:
+            continue
+        if not include_test and is_test_event(row):
+            excluded_test_rows += 1
             continue
         recent_rows.append(row)
 
@@ -174,6 +184,7 @@ def build_report(*, path: Path, last_days: int) -> dict[str, Any]:
         f"unconfirmed_used_hits={unconfirmed_used_hit_closeouts}, "
         f"linked_retrieval_id_missing={linked_retrieval_id_missing}, "
         f"closeout_integrity_missing={closeout_integrity_missing}, "
+        f"excluded_test_rows={excluded_test_rows}, "
         f"session_brief_help_rate={'n/a' if session_brief_help_rate is None else session_brief_help_rate}, "
         f"session_brief_telemetry_missing={session_brief_telemetry_missing}"
     )
@@ -218,6 +229,8 @@ def build_report(*, path: Path, last_days: int) -> dict[str, Any]:
             lambda row: bool(_as_list(row.get("adopted_entry_ids"))),
         ),
         "skipped_invalid_ts_rows": skipped_invalid_ts,
+        "excluded_test_rows": excluded_test_rows,
+        "include_test": include_test,
         "summary": summary,
     }
 
@@ -232,10 +245,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--closeout", default="", help="Override closeout.jsonl path")
     parser.add_argument("--last-days", type=int, default=7, help="Only include recent closeouts from the last N days")
     parser.add_argument("--text", action="store_true", help="Print a short text line before the JSON payload")
+    parser.add_argument("--include-test", action="store_true", help="Include rows explicitly marked as test runtime")
     args = parser.parse_args(argv)
 
     path = Path(args.closeout).expanduser() if args.closeout else default_closeout_path()
-    report = build_report(path=path, last_days=args.last_days)
+    report = build_report(path=path, last_days=args.last_days, include_test=args.include_test)
     if args.text:
         _print_text(report)
     else:

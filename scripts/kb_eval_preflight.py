@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import kb_audit_codex_sessions as session_audit
+import kb_command_contract as command_contract
 from kb_lib import personal_kb_root_dir
 
 
@@ -1127,6 +1128,8 @@ def _run_rag_query(
         command.append("--global")
     env = dict(os.environ)
     env["PERSONAL_KB_ROOT"] = str(kb_root)
+    env["PERSONAL_KB_RUNTIME_SOURCE"] = "test"
+    env["PERSONAL_KB_TEST_RUN_ID"] = f"preflight-{os.getpid()}-{time.time_ns()}"
     started = time.perf_counter()
     try:
         completed = subprocess.run(
@@ -1439,11 +1442,20 @@ def _historical_turns(
             outputs.get(str(payload.get("call_id") or ""), ""),
         )
         for command in commands:
-            tokens = session_audit._parse_cli_tokens(command)
+            tokens = command_contract.parse_cli_tokens(command)
+            detected = command_contract.direct_or_wrapper_scripts(command)
+            # Keep nested Python invocation support from the session parser,
+            # while direct and wrapper calls use the shared public contract.
+            for key in session_audit._detected_scripts(command):
+                if key not in detected:
+                    detected.append(key)
             scripts = [
                 key
-                for key in session_audit._detected_scripts(command)
-                if not session_audit._is_help_invocation(tokens, session_audit.KB_CALL_PATTERNS[key])
+                for key in detected
+                if not command_contract.is_help_invocation(
+                    tokens,
+                    command_contract.KB_SCRIPT_PATTERNS[key],
+                )
             ]
             attempts = sum(key in {"kb_rag_context", "kb_search"} for key in scripts)
             if not attempts:
@@ -1652,6 +1664,49 @@ def _strict_failures(report: dict[str, Any]) -> list[str]:
     return failures
 
 
+def _metric_domains(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    cases = report.get("case_metrics") or {}
+    retrieval = report.get("retrieval_metrics") or {}
+    return {
+        "policy_routing_accuracy": {
+            "source": "deterministic_policy_simulator",
+            "available": bool(cases.get("case_total")),
+            "case_total": int(cases.get("case_total") or 0),
+            "phase_accuracy": cases.get("phase_accuracy"),
+            "action_accuracy": cases.get("action_accuracy"),
+            "coordination_accuracy": cases.get("coordination_accuracy"),
+            "live_codex_behavior": False,
+        },
+        "retrieval_hit_quality": {
+            "source": "read_only_counterfactual_retrieval",
+            "available": bool(retrieval),
+            "case_total": int(retrieval.get("retrieval_case_total") or 0),
+            "contract_pass_rate": retrieval.get("retrieval_case_pass_rate"),
+            "required_hit_case_pass_rate": retrieval.get("required_hit_case_pass_rate"),
+            "irrelevant_slot_rate": retrieval.get("irrelevant_slot_rate"),
+            "live_codex_behavior": False,
+        },
+        "real_adoption": {
+            "source": "production_closeout_runtime",
+            "available": False,
+            "value": None,
+            "measure_with": "kb_eval.py audit-runtime --last-days N",
+        },
+        "closeout_completion": {
+            "source": "real_codex_session_audit",
+            "available": False,
+            "value": None,
+            "measure_with": "kb_eval.py audit-sessions --last-days N",
+        },
+        "final_task_benefit": {
+            "source": "human_outcome_review",
+            "available": False,
+            "value": None,
+            "measure_with": "task-specific human review",
+        },
+    }
+
+
 def _print_text(report: dict[str, Any]) -> None:
     cases = report["case_metrics"]
     print(
@@ -1688,6 +1743,20 @@ def _print_text(report: dict[str, Any]) -> None:
             f"- candidate_predicted_retrieval_segments: {history['candidate_predicted_retrieval_segments']}\n"
             f"- candidate_suppressions: {history['candidate_suppressions']}\n"
             f"- candidate_additions: {history['candidate_additions']}"
+        )
+    domains = report.get("metric_domains") or {}
+    print("- metric_domains:")
+    for name in (
+        "policy_routing_accuracy",
+        "retrieval_hit_quality",
+        "real_adoption",
+        "closeout_completion",
+        "final_task_benefit",
+    ):
+        domain = domains.get(name) or {}
+        print(
+            f"  - {name}: source={domain.get('source', '')} "
+            f"available={bool(domain.get('available'))}"
         )
     if report.get("strict_failures"):
         print("- strict_failures:")
@@ -1863,6 +1932,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         report["history"]["excluded_session_ids"] = sorted(excluded)
 
+    report["metric_domains"] = _metric_domains(report)
     report["strict_failures"] = _strict_failures(report)
     report["strict_pass"] = not report["strict_failures"]
     if args.json:

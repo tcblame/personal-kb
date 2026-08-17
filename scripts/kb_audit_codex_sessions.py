@@ -13,22 +13,12 @@ from pathlib import Path
 from typing import Any
 
 from kb_lib import runtime_file
+from kb_runtime import is_test_event
+import kb_command_contract as command_contract
 
 
-KB_CALL_PATTERNS = {
-    "kb_rag_context": "kb_rag_context.py",
-    "kb_search": "kb_search.py",
-    "kb_closeout": "kb_closeout.py",
-    "kb_add": "kb_add.py",
-    "kb_update": "kb_update.py",
-}
-KB_WRAPPER_COMMANDS = {
-    "retrieve": "kb_rag_context",
-    "search": "kb_search",
-    "closeout": "kb_closeout",
-    "remember": "kb_add",
-    "update": "kb_update",
-}
+KB_CALL_PATTERNS = command_contract.KB_SCRIPT_PATTERNS
+KB_WRAPPER_COMMANDS = command_contract.KB_WRAPPER_COMMANDS
 
 FORBID_KB_RE = re.compile(
     r"禁止执行\s*(KB|kb)|不要执行\s*(KB|kb)|禁止运行\s*kb_|不要运行\s*kb_|"
@@ -49,7 +39,7 @@ RUNTIME_AUDIT_RE = re.compile(
 EXIT_RE = re.compile(r"Process exited with code\s+(-?\d+)")
 RAG_TEXT_RETRIEVAL_ID_RE = re.compile(r'retrieval_id="([A-Za-z0-9._:-]+)"')
 RETRIEVAL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
-PYTHON_EXECUTABLE_RE = re.compile(r"python(?:\d+(?:\.\d+)?)?|py", re.I)
+PYTHON_EXECUTABLE_RE = command_contract.PYTHON_EXECUTABLE_RE
 CONTEXT_PREFIXES = (
     "# AGENTS.md instructions",
     "<INSTRUCTIONS>",
@@ -68,6 +58,90 @@ UUID_RE = re.compile(
     r"(?i)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
 )
 PARSER_VERSION = "codex-shell-v9"
+HUMAN_LABEL_VALUES = frozenset({"confirmed_missed_retrieval", "auditor_false_positive"})
+
+
+def default_human_labels_path() -> Path:
+    return (
+        Path(__file__).resolve().parents[3]
+        / "docs"
+        / "req"
+        / "001-personal-kb-taxonomy"
+        / "evals"
+        / "runtime-session-human-labels.json"
+    )
+
+
+def _load_human_labels(path: Path) -> tuple[list[dict[str, Any]], str, list[str]]:
+    if not path.is_file():
+        return [], "not_configured", []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return [], "invalid", [str(exc)]
+    raw_labels = payload.get("labels") if isinstance(payload, dict) else None
+    if not isinstance(raw_labels, list):
+        return [], "invalid", ["labels must be a list"]
+
+    labels: list[dict[str, Any]] = []
+    errors: list[str] = []
+    seen: set[str] = set()
+    for index, row in enumerate(raw_labels):
+        if not isinstance(row, dict):
+            errors.append(f"labels[{index}] must be an object")
+            continue
+        session_id = str(row.get("session_id") or "").strip()
+        label = str(row.get("label") or "").strip()
+        if not session_id:
+            errors.append(f"labels[{index}].session_id is required")
+            continue
+        if session_id in seen:
+            errors.append(f"labels[{index}].session_id is duplicated")
+            continue
+        if label not in HUMAN_LABEL_VALUES:
+            errors.append(
+                f"labels[{index}].label must be one of: {', '.join(sorted(HUMAN_LABEL_VALUES))}"
+            )
+            continue
+        seen.add(session_id)
+        labels.append({
+            "session_id": session_id,
+            "label": label,
+            "reviewed_at": str(row.get("reviewed_at") or ""),
+            "reason": str(row.get("reason") or ""),
+        })
+    return labels, "invalid" if errors else "loaded", errors
+
+
+def _human_review_summary(
+    sessions: list[dict[str, Any]],
+    missed_main: list[dict[str, Any]],
+    path: Path,
+) -> dict[str, Any]:
+    labels, status, errors = _load_human_labels(path)
+    session_ids = {str(row.get("session_id") or "") for row in sessions}
+    candidate_ids = {str(row.get("session_id") or "") for row in missed_main}
+    in_window = [row for row in labels if row["session_id"] in session_ids]
+    reviewed_candidates = [row for row in in_window if row["session_id"] in candidate_ids]
+    confirmed = [row for row in in_window if row["label"] == "confirmed_missed_retrieval"]
+    false_positives = [row for row in in_window if row["label"] == "auditor_false_positive"]
+    reviewed_candidate_ids = {row["session_id"] for row in reviewed_candidates}
+    return {
+        "path": str(path),
+        "status": status,
+        "errors": errors,
+        "label_total": len(labels),
+        "in_window_label_total": len(in_window),
+        "auditor_candidate_total": len(missed_main),
+        "reviewed_candidate_total": len(reviewed_candidates),
+        "confirmed_missed_retrieval_total": len(confirmed),
+        "auditor_false_positive_total": len(false_positives),
+        "unreviewed_auditor_candidate_total": len(candidate_ids - reviewed_candidate_ids),
+        "confirmed_not_flagged_total": sum(
+            row["session_id"] not in candidate_ids for row in confirmed
+        ),
+        "samples": in_window[:10],
+    }
 
 
 def _json_loads(value: str) -> dict[str, Any]:
@@ -220,31 +294,15 @@ def _call_commands(payload: dict[str, Any]) -> tuple[list[str], str]:
 
 
 def _parse_cli_tokens(command: str) -> list[str]:
-    try:
-        return shlex.split(command)
-    except ValueError:
-        return command.split()
+    return command_contract.parse_cli_tokens(command)
 
 
 def _token_basename(token: str) -> str:
-    return Path(str(token or "").strip().strip("\"'")).name
+    return command_contract.token_basename(token)
 
 
 def _direct_script(tokens: list[str], script_name: str) -> bool:
-    for index, token in enumerate(tokens):
-        if _token_basename(token) != script_name:
-            continue
-        if index == 0:
-            return True
-        previous = tokens[index - 1]
-        if previous in {"&&", ";", "||", "|"}:
-            return True
-        cursor = index - 1
-        while cursor >= 0 and tokens[cursor].startswith("-") and tokens[cursor] != "-":
-            cursor -= 1
-        if cursor >= 0 and PYTHON_EXECUTABLE_RE.fullmatch(_token_basename(tokens[cursor])):
-            return True
-    return False
+    return command_contract.direct_script_index(tokens, script_name) is not None
 
 
 def _nested_script(command: str, script_name: str) -> bool:
@@ -257,14 +315,7 @@ def _nested_script(command: str, script_name: str) -> bool:
 
 
 def _wrapper_invocation(tokens: list[str]) -> tuple[str, int] | None:
-    if not _direct_script(tokens, "kb.py"):
-        return None
-    index = _script_index(tokens, "kb.py")
-    if index is None or index + 1 >= len(tokens):
-        return None
-    command = tokens[index + 1]
-    key = KB_WRAPPER_COMMANDS.get(command)
-    return (key, index + 1) if key else None
+    return command_contract.wrapper_invocation(tokens)
 
 
 def _detected_scripts(command: str) -> list[str]:
@@ -366,19 +417,11 @@ def _turn_id(payload: dict[str, Any], fallback: str = "") -> str:
 
 
 def _script_index(tokens: list[str], script_name: str) -> int | None:
-    for index, token in enumerate(tokens):
-        if _token_basename(token) == script_name:
-            return index
-    return None
+    return command_contract.script_index(tokens, script_name)
 
 
 def _is_help_invocation(tokens: list[str], script_name: str) -> bool:
-    index = _script_index(tokens, script_name)
-    if index is not None:
-        return any(token in {"-h", "--help"} for token in tokens[index + 1 :])
-    wrapped = _wrapper_invocation(tokens)
-    expected_key = next((key for key, value in KB_CALL_PATTERNS.items() if value == script_name), "")
-    return bool(wrapped and wrapped[0] == expected_key and any(token in {"-h", "--help"} for token in tokens[wrapped[1] + 1 :]))
+    return command_contract.is_help_invocation(tokens, script_name)
 
 
 def _rag_query(tokens: list[str], script_name: str) -> str:
@@ -395,13 +438,7 @@ def _rag_query(tokens: list[str], script_name: str) -> str:
 
 
 def _flag_values(tokens: list[str], flag: str) -> list[str]:
-    values: list[str] = []
-    for index, token in enumerate(tokens):
-        if token == flag and index + 1 < len(tokens):
-            values.append(tokens[index + 1])
-        elif token.startswith(flag + "="):
-            values.append(token.split("=", 1)[1])
-    return [value for value in values if value]
+    return command_contract.repeated_flag_values(tokens, flag)
 
 
 def _closeout_details(tokens: list[str]) -> tuple[list[str], int, list[str]]:
@@ -888,10 +925,15 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     sessions = [_parse_session(path) for path in paths]
     parent_scout_stats = _reconcile_parent_scout_sessions(sessions)
     date_set = set(dates)
-    closeouts = [
+    dated_closeouts = [
         row
         for row in _read_closeouts(Path(args.closeout).expanduser())
         if _closeout_date(row) in date_set
+    ]
+    include_test = bool(getattr(args, "include_test", False))
+    excluded_test_rows = sum(is_test_event(row) for row in dated_closeouts) if not include_test else 0
+    closeouts = [
+        row for row in dated_closeouts if include_test or not is_test_event(row)
     ]
 
     def count(pred) -> int:
@@ -948,6 +990,13 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         if s["is_main"]
         and _as_int(s["counters"].get("kb_closeout")) > 0
     ]
+    human_labels_value = str(getattr(args, "human_labels", "") or "").strip()
+    human_labels_path = (
+        Path(human_labels_value).expanduser()
+        if human_labels_value
+        else default_human_labels_path()
+    )
+    human_review = _human_review_summary(sessions, missed_main, human_labels_path)
 
     closeout_issues = {
         "rows": len(closeouts),
@@ -1010,6 +1059,11 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "main_sessions": count(lambda s: s["is_main"]),
         "subagent_sessions": count(lambda s: s["is_subagent"]),
         "main_missed_rag_sessions": len(missed_main),
+        "main_missed_rag_semantics": "auditor_candidate_not_human_ground_truth",
+        "auditor_candidate_missed_rag_sessions": len(missed_main),
+        "human_confirmed_missed_rag_sessions": human_review["confirmed_missed_retrieval_total"],
+        "human_confirmed_false_positive_sessions": human_review["auditor_false_positive_total"],
+        "human_review": human_review,
         "forbidden_kb_violation_sessions": len(violations),
         "main_expected_rag_sessions": len(main_expected_rag),
         "main_expected_and_used_rag_sessions": len(main_expected_and_used_rag),
@@ -1032,6 +1086,8 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             (detected_kb_call_count - execution_unknown_kb_call_count) / detected_kb_call_count, 4
         ) if detected_kb_call_count else None,
         "closeout_issues": closeout_issues,
+        "excluded_test_rows": excluded_test_rows,
+        "include_test": include_test,
         "examples": {
             "forbidden_kb_violations": violations[: args.examples],
             "main_missed_rag": missed_main[: args.examples],
@@ -1048,6 +1104,13 @@ def _print_text(report: dict[str, Any]) -> None:
     print(f"- main_sessions: {report['main_sessions']}")
     print(f"- main_missed_rag_sessions: {report['main_missed_rag_sessions']}")
     print(
+        "- missed_rag_review: "
+        f"auditor_candidates={report['auditor_candidate_missed_rag_sessions']} "
+        f"human_confirmed={report['human_confirmed_missed_rag_sessions']} "
+        f"human_false_positives={report['human_confirmed_false_positive_sessions']} "
+        f"unreviewed={report['human_review']['unreviewed_auditor_candidate_total']}"
+    )
+    print(
         f"- main_expected_rag_sessions: {report['main_expected_rag_sessions']} "
         f"(used {report['main_expected_and_used_rag_sessions']})"
     )
@@ -1062,6 +1125,7 @@ def _print_text(report: dict[str, Any]) -> None:
         f"execution_coverage={report['execution_status_coverage']}"
     )
     print(f"- closeout_issues: {report['closeout_issues']}")
+    print(f"- excluded_test_rows: {report['excluded_test_rows']}")
     for group, rows in report["examples"].items():
         print(f"\n{group}:")
         if not rows:
@@ -1082,6 +1146,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--closeout", default=str(runtime_file("closeout.jsonl")))
     parser.add_argument("--examples", type=int, default=5, help="Examples per issue type")
     parser.add_argument("--json", action="store_true", help="Print JSON")
+    parser.add_argument("--include-test", action="store_true", help="Include closeout rows explicitly marked as test runtime")
+    parser.add_argument(
+        "--human-labels",
+        default=str(default_human_labels_path()),
+        help="Optional human-reviewed session labels JSON",
+    )
     args = parser.parse_args(argv)
 
     report = build_report(args)

@@ -8,6 +8,10 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
+import kb_test_guard
+
+_TEST_GUARD = kb_test_guard.activate(__file__) if __name__ == "__main__" else None
+
 import kb_challenge
 from kb_lib import append_jsonl, kb_base_dir, read_jsonl, runtime_file
 
@@ -174,4 +178,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(_TEST_GUARD.run(main) if _TEST_GUARD else main())

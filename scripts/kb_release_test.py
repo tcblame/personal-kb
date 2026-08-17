@@ -6,6 +6,10 @@ import sys
 import tempfile
 from pathlib import Path
 
+import kb_test_guard
+
+_TEST_GUARD = kb_test_guard.activate(__file__) if __name__ == "__main__" else None
+
 import kb_release
 
 
@@ -81,6 +85,37 @@ def test_default_output_supports_source_and_public_root_layouts() -> None:
 
 def _file_list(root: Path) -> list[str]:
     return sorted(str(path.relative_to(root)) for path in root.rglob("*") if path.is_file())
+
+
+def _metadata_fingerprint(output: Path) -> dict[str, tuple[int, int, str]]:
+    paths = [path for path in output.rglob("*") if path.is_file()]
+    state = kb_release._release_state_path(output)
+    if state.is_file():
+        paths.append(state)
+    return {
+        str(path): (path.stat().st_size, path.stat().st_mtime_ns, kb_release._sha256_file(path))
+        for path in paths
+    }
+
+
+def test_release_check_is_read_only_and_reports_differences() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        source = _source(root)
+        output = root / "release"
+        kb_release.build_release(source, output)
+        before = _metadata_fingerprint(output)
+
+        matching = kb_release.check_release(source, output)
+        assert matching["matches"] is True
+        assert matching["read_only"] is True
+        assert _metadata_fingerprint(output) == before
+
+        (source / "scripts" / "kb.py").write_text("print('changed')\n", encoding="utf-8")
+        different = kb_release.check_release(source, output)
+        assert different["matches"] is False
+        assert different["changed_files"] == ["scripts/kb.py"]
+        assert _metadata_fingerprint(output) == before
 
 
 def test_unknown_nonempty_output_is_refused() -> None:
@@ -219,6 +254,7 @@ def test_exported_release_scanner_accepts_public_placeholders() -> None:
 def main() -> int:
     test_allowlist_export_is_repeatable_and_excludes_local_data()
     test_default_output_supports_source_and_public_root_layouts()
+    test_release_check_is_read_only_and_reports_differences()
     test_unknown_nonempty_output_is_refused()
     test_missing_license_is_refused()
     test_unknown_entry_in_owned_output_is_refused()
@@ -231,4 +267,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(_TEST_GUARD.run(main) if _TEST_GUARD else main())

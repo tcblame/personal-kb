@@ -19,6 +19,7 @@ if sys.platform == "win32" and hasattr(sys.stdout, "buffer"):
 
 import kb_search
 import kb_session_brief
+from kb_runtime import runtime_scope
 import kb_evidence
 from kb_kinds import VALID_KINDS, parse_kind_filter, parse_legacy_type_filter
 from kb_lib import JsonlSafetyError, expand_query, load_config, load_synonyms
@@ -63,7 +64,13 @@ RETRIEVAL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 
 def _retrieval_id(value: str) -> str:
-    candidate = str(value or "").strip() or uuid.uuid4().hex
+    explicit = str(value or "").strip()
+    scope = runtime_scope()
+    if explicit and scope["source"] != "test":
+        raise ValueError(
+            "--retrieval-id is test-only; production retrieval IDs are generated automatically"
+        )
+    candidate = explicit or uuid.uuid4().hex
     if not RETRIEVAL_ID_RE.fullmatch(candidate):
         raise ValueError(
             "--retrieval-id must be 1-128 opaque characters using letters, digits, '.', '_', ':', or '-'"
@@ -1364,6 +1371,7 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
         "query_groups": query_group_payload,
         "rejected_weak_count": rejected_count,
         "items": items,
+        "runtime": runtime_scope(),
     }
     if filtered_low_confidence:
         payload["filtered_low_confidence_count"] = filtered_low_confidence
@@ -1432,7 +1440,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument(
         "--retrieval-id",
         default="",
-        help="Optional opaque runtime correlation ID; generated automatically when omitted",
+        help="Test-only opaque correlation ID; production IDs are generated automatically",
     )
     parser.add_argument("--repo", default="", help="Override repo bucket")
     parser.add_argument("--branch", default="", help="Override branch bucket")

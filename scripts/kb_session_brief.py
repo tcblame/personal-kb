@@ -15,6 +15,7 @@ if sys.platform == "win32" and hasattr(sys.stdout, "buffer"):
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace", line_buffering=True)
 
 from kb_lib import append_jsonl, generate_entry_id, kb_base_dir, now_iso, read_jsonl, resolve_context, runtime_file
+from kb_runtime import attach_runtime_scope, is_test_event, runtime_scope
 
 
 CURRENT_BRIEF_STATUSES = {"", "active", "current"}
@@ -144,7 +145,7 @@ def build_brief(
     clean_queries = _dedupe_strings(queries)
     clean_tags = _dedupe_strings(tags)
     clean_anchors = _dedupe_strings(anchors) or _default_anchor_terms(clean_title, clean_summary, *clean_queries)
-    return {
+    return attach_runtime_scope({
         "id": generate_entry_id(ts, clean_title),
         "ts": ts,
         "event": "kb_session_brief",
@@ -163,7 +164,7 @@ def build_brief(
         "source": source.strip() or "unknown",
         "session_id": session_id.strip(),
         "status": status.strip() or "current",
-    }
+    })
 
 
 def _write_rows(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -187,8 +188,11 @@ def _apply_current_limit(
         return False
     keep_limit = min(3, max(1, keep_current))
     current_rows: list[tuple[float, str, int]] = []
+    include_test = runtime_scope()["source"] == "test"
     for index, row in enumerate(rows):
         if row.get("event") != "kb_session_brief":
+            continue
+        if not include_test and is_test_event(row):
             continue
         if not _same_repo_branch(row, repo, branch):
             continue
@@ -222,6 +226,7 @@ def maintain_current_briefs(
         return path, 0
 
     rows = read_jsonl(path)
+    include_test = runtime_scope()["source"] == "test"
     changed = 0
     if repo or branch:
         changed = 1 if _apply_current_limit(rows, repo=repo, branch=branch, keep_current=keep_current) else 0
@@ -229,6 +234,8 @@ def maintain_current_briefs(
         coords: list[tuple[str, str]] = []
         for row in rows:
             if row.get("event") != "kb_session_brief":
+                continue
+            if not include_test and is_test_event(row):
                 continue
             coord = (str(row.get("repo", "")), str(row.get("branch", "")))
             if coord not in coords:
@@ -250,11 +257,12 @@ def append_brief(
 ) -> Path:
     path = session_briefs_path(base_dir)
     rows = read_jsonl(path) if path.exists() else []
-    rows.append(brief)
+    scoped_brief = attach_runtime_scope(brief)
+    rows.append(scoped_brief)
     _apply_current_limit(
         rows,
-        repo=str(brief.get("repo", "")),
-        branch=str(brief.get("branch", "")),
+        repo=str(scoped_brief.get("repo", "")),
+        branch=str(scoped_brief.get("branch", "")),
         keep_current=keep_current,
     )
     _write_rows(path, rows)
@@ -360,9 +368,12 @@ def search_recent_briefs(
     terms = _split_terms(query)
     cutoff_ts = (datetime.now() - timedelta(days=max(1, recent_days))).timestamp()
     rows = read_jsonl(path)
+    include_test = runtime_scope()["source"] == "test"
     scored: list[tuple[float, float, dict[str, Any], dict[str, list[str]]]] = []
     for row in rows:
         if row.get("event") != "kb_session_brief":
+            continue
+        if not include_test and is_test_event(row):
             continue
         if not _is_current(row):
             continue

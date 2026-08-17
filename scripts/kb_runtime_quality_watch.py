@@ -17,6 +17,7 @@ if sys.platform == "win32" and hasattr(sys.stdout, "buffer"):
 import kb_audit_runtime_value
 import kb_session_brief
 from kb_lib import append_jsonl, kb_base_dir, now_iso, read_jsonl, runtime_file
+from kb_runtime import attach_runtime_scope, is_test_event
 
 
 def closeout_path(base_dir: Path) -> Path:
@@ -229,11 +230,11 @@ def make_quality_event(
         payload["hit_count"] = _coerce_int(row.get("hit_count"))
         payload["rag_calls"] = _coerce_int(row.get("rag_calls"))
         payload["used_count"] = len(_as_list(row.get("used_entry_ids")))
-    return payload
+    return attach_runtime_scope(payload)
 
 
 def make_repair_event(*, base_dir: Path, changed_groups: int) -> dict[str, Any]:
-    return {
+    return attach_runtime_scope({
         "ts": now_iso(),
         "event": "kb_runtime_quality_repair",
         "status": "repair",
@@ -241,7 +242,7 @@ def make_repair_event(*, base_dir: Path, changed_groups: int) -> dict[str, Any]:
         "source_path": str(session_briefs_path(base_dir)),
         "changed_groups": changed_groups,
         "note": "maintained current brief window",
-    }
+    })
 
 
 def process_once(
@@ -262,6 +263,7 @@ def process_once(
     session_brief_telemetry_missing_count = 0
     closeout_integrity_missing_count = 0
     repaired_groups = 0
+    excluded_test_rows = 0
     truncated_sources: list[str] = []
 
     sources = [
@@ -279,6 +281,9 @@ def process_once(
 
         for line_no, row in rows:
             observed += 1
+            if "_invalid_json_line" not in row and is_test_event(row):
+                excluded_test_rows += 1
+                continue
             if "_invalid_json_line" in row:
                 event = make_quality_event(
                     source=source_name,
@@ -322,7 +327,7 @@ def process_once(
             append_jsonl(log_path, make_repair_event(base_dir=base_dir, changed_groups=changed))
 
     _save_state(state_path, state)
-    return {
+    return attach_runtime_scope({
         "ts": now_iso(),
         "event": "kb_runtime_quality_watch_summary",
         "observed_rows": observed,
@@ -333,9 +338,10 @@ def process_once(
         "session_brief_telemetry_missing_count": session_brief_telemetry_missing_count,
         "closeout_integrity_missing_count": closeout_integrity_missing_count,
         "repaired_groups": repaired_groups,
+        "excluded_test_rows": excluded_test_rows,
         "truncated_sources": truncated_sources,
         "quality_log_path": str(log_path),
-    }
+    })
 
 
 def _print_summary(summary: dict[str, Any], *, include_runtime_value: bool, base_dir: Path) -> None:

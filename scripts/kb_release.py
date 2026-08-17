@@ -9,6 +9,7 @@ release failure is safer than silently shipping local paths or corpus data.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import shutil
@@ -122,6 +123,14 @@ def _public_replacements(text: str) -> str:
 def _copy_text(source: Path, target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(_public_replacements(source.read_text(encoding="utf-8", errors="replace")), encoding="utf-8")
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _first_file(*candidates: Path | None) -> Path | None:
@@ -442,6 +451,86 @@ def build_release(source: Path, output: Path) -> dict[str, object]:
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
         raise
+
+
+def _release_fingerprint(root: Path) -> dict[str, str]:
+    if not root.is_dir():
+        return {}
+    result: dict[str, str] = {}
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.is_symlink():
+            continue
+        result[path.relative_to(root).as_posix()] = _sha256_file(path)
+    return result
+
+
+def check_release(source: Path, output: Path) -> dict[str, object]:
+    source = source.expanduser().resolve()
+    output = output.expanduser().resolve()
+    before = _release_fingerprint(output)
+    state_path = _release_state_path(output)
+    state_before = _sha256_file(state_path) if state_path.is_file() else ""
+    state_error = ""
+    if output.exists():
+        try:
+            _load_owned_output_state(output)
+        except ValueError as exc:
+            state_error = str(exc)
+
+    with tempfile.TemporaryDirectory(prefix="personal-kb-release-check-") as temp_dir:
+        candidate = Path(temp_dir) / "release"
+        build_release(source, candidate)
+        expected = _release_fingerprint(candidate)
+
+    after = _release_fingerprint(output)
+    state_after = _sha256_file(state_path) if state_path.is_file() else ""
+    if before != after or state_before != state_after:
+        raise RuntimeError("release-check modified the formal release output")
+
+    missing = sorted(set(expected) - set(after))
+    extra = sorted(set(after) - set(expected))
+    changed = sorted(
+        name for name in set(expected).intersection(after)
+        if expected[name] != after[name]
+    )
+    scan_findings = [] if not output.is_dir() else [
+        *_root_layout_findings(output),
+        *_scan_release(output),
+    ]
+    if not output.is_dir():
+        scan_findings.append(f"release output is missing: {output}")
+    matches = not (state_error or missing or extra or changed or scan_findings)
+    return {
+        "status": "ok" if matches else "different",
+        "source": str(source),
+        "output": str(output),
+        "read_only": True,
+        "matches": matches,
+        "state_error": state_error,
+        "missing_files": missing,
+        "extra_files": extra,
+        "changed_files": changed,
+        "scan_findings": scan_findings,
+        "expected_file_count": len(expected),
+        "actual_file_count": len(after),
+    }
+
+
+def check_main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Read-only check of the formal Personal KB release tree.")
+    parser.add_argument("--source", default=str(Path(__file__).resolve().parent.parent))
+    parser.add_argument("--output", default="")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+    source = Path(args.source)
+    output = Path(args.output) if args.output else _default_output(source.resolve())
+    try:
+        result = check_release(source, output)
+    except (OSError, RuntimeError, ValueError) as exc:
+        sys.stderr.write(f"release check failed: {exc}\n")
+        return 2
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0 if result["matches"] else 3
 
 
 def main(argv: list[str] | None = None) -> int:

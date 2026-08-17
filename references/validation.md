@@ -32,7 +32,8 @@ python3 <skill-root>/scripts/kb_sensitive_scan_test.py
 python3 <skill-root>/scripts/kb_quality_gate_test.py
 python3 <skill-root>/scripts/kb_quality_gate.py --keep-from 2026-07-01 --strict
 python3 <skill-root>/scripts/kb_smoke_test.py <skill-root>
-python3 <skill-root>/scripts/kb_eval.py release-check
+python3 <skill-root>/scripts/kb_eval.py release-build --output <release-dir>
+python3 <skill-root>/scripts/kb_eval.py release-check --output <release-dir>
 python3 <skill-creator-root>/scripts/quick_validate.py <skill-root>
 git diff --check
 ```

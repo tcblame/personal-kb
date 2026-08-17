@@ -61,7 +61,11 @@
         ]
       },
       "retrieval_expectation": {
-        "allow_zero_hits": true,
+        "allow_zero_hits": false,
+        "min_hits": 1,
+        "must_find_any": [
+          "385490e8"
+        ],
         "relevance_anchor_any": [
           "superpower",
           "superpowers",
@@ -152,7 +156,12 @@
         }
       },
       "retrieval_expectation": {
-        "allow_zero_hits": true,
+        "allow_zero_hits": false,
+        "min_hits": 2,
+        "must_find_any": [
+          "82a3a155",
+          "b83ef2f5"
+        ],
         "relevance_anchor_any": [
           "ccs",
           "cc-switch",
@@ -193,7 +202,11 @@
         ]
       },
       "retrieval_expectation": {
-        "allow_zero_hits": true,
+        "allow_zero_hits": false,
+        "min_hits": 1,
+        "must_find_any": [
+          "385490e8"
+        ],
         "relevance_anchor_any": [
           "superpower",
           "superpowers",
@@ -297,7 +310,11 @@
         ]
       },
       "retrieval_expectation": {
-        "allow_zero_hits": true,
+        "allow_zero_hits": false,
+        "min_hits": 1,
+        "must_find_any": [
+          "35e3faa6"
+        ],
         "relevance_anchor_any": [
           "learnai",
           "仓库",
@@ -328,7 +345,12 @@
         ]
       },
       "retrieval_expectation": {
-        "allow_zero_hits": true,
+        "allow_zero_hits": false,
+        "min_hits": 1,
+        "must_find_any": [
+          "35e3faa6",
+          "8c963ab0"
+        ],
         "relevance_anchor_any": [
           "learnai",
           "java",
@@ -359,7 +381,12 @@
         ]
       },
       "retrieval_expectation": {
-        "allow_zero_hits": true,
+        "allow_zero_hits": false,
+        "min_hits": 1,
+        "must_find_any": [
+          "677b2135",
+          "3d91b3ed"
+        ],
         "relevance_anchor_any": [
           "cc switch",
           "cc-switch",
@@ -539,7 +566,11 @@
         ]
       },
       "retrieval_expectation": {
-        "allow_zero_hits": true,
+        "allow_zero_hits": false,
+        "min_hits": 1,
+        "must_find_any": [
+          "35e3faa6"
+        ],
         "relevance_anchor_any": [
           "learnai",
           "仓库",
@@ -623,7 +654,11 @@
         ]
       },
       "retrieval_expectation": {
-        "allow_zero_hits": true,
+        "allow_zero_hits": false,
+        "min_hits": 1,
+        "must_find_any": [
+          "b83ef2f5"
+        ],
         "relevance_anchor_any": [
           "resume",
           "简历",
@@ -655,7 +690,11 @@
         ]
       },
       "retrieval_expectation": {
-        "allow_zero_hits": true,
+        "allow_zero_hits": false,
+        "min_hits": 1,
+        "must_find_any": [
+          "82a3a155"
+        ],
         "relevance_anchor_any": [
           "cc-switch",
           "启动",

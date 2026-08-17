@@ -12,19 +12,7 @@ import importlib
 import sys
 from typing import Callable
 
-
-DAILY_COMMANDS: dict[str, tuple[str, str, list[str]]] = {
-    "retrieve": ("kb_rag_context", "main", []),
-    "search": ("kb_search", "main", []),
-    "remember": ("kb_add", "main", []),
-    "update": ("kb_update", "main", []),
-    "retain": ("kb_retain_file", "main", ["retain"]),
-    "reference": ("kb_retain_file", "main", ["reference"]),
-    "evidence": ("kb_retain_file", "main", []),
-    "closeout": ("kb_closeout", "main", []),
-    "challenge": ("kb_challenge", "main", []),
-    "where": ("kb_whereami", "main", []),
-}
+from kb_command_contract import DAILY_COMMANDS
 
 
 def _run(module_name: str, function_name: str, argv: list[str]) -> int:
@@ -52,6 +40,11 @@ def main(argv: list[str] | None = None) -> int:
     spec = DAILY_COMMANDS.get(command)
     if spec is None:
         sys.stderr.write(f"unknown daily command: {command}\n")
+        return 2
+    if command == "closeout" and "--legacy-allow-unlinked-retrievals" in args:
+        sys.stderr.write(
+            "legacy unlinked closeout compatibility is available only through the focused kb_closeout.py script\n"
+        )
         return 2
     module_name, function_name, prefix = spec
     return _run(module_name, function_name, [*prefix, *args])

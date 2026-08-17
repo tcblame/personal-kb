@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,113 @@ FRESHNESS_STATES = frozenset(
         "not_snapshotted",
     }
 )
+VALID_EVIDENCE_REF_TYPES = frozenset({"git_commit", "conversation", "retained"})
+GIT_COMMIT_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
+ASSET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$")
+
+
+def validate_evidence_refs(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        return ["evidence_refs must be a list"]
+    errors: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for index, ref in enumerate(value):
+        label = f"evidence_refs[{index}]"
+        if not isinstance(ref, dict):
+            errors.append(f"{label} must be an object")
+            continue
+        ref_type = str(ref.get("type") or "").strip()
+        ref_value = str(ref.get("value") or "").strip()
+        if ref_type not in VALID_EVIDENCE_REF_TYPES:
+            errors.append(
+                f"{label}.type must be one of: {', '.join(sorted(VALID_EVIDENCE_REF_TYPES))}"
+            )
+            continue
+        if not ref_value:
+            errors.append(f"{label}.value is required")
+            continue
+        if ref_type == "git_commit" and not GIT_COMMIT_RE.fullmatch(ref_value):
+            errors.append(f"{label}.value must be a 7-64 character hexadecimal Git commit")
+        if ref_type == "retained":
+            if not ASSET_ID_RE.fullmatch(ref_value):
+                errors.append(f"{label}.value must be an opaque retained asset ID")
+            relative = str(ref.get("path") or "").strip()
+            if not relative:
+                errors.append(f"{label}.path is required for retained evidence")
+            else:
+                path = Path(relative)
+                if path.is_absolute() or ".." in path.parts:
+                    errors.append(f"{label}.path must be a safe relative path")
+        key = (ref_type, ref_value)
+        if key in seen:
+            errors.append(f"{label} duplicates an earlier evidence reference")
+        seen.add(key)
+    return errors
+
+
+def _retained_manifest_row(asset_id: str) -> dict[str, Any] | None:
+    try:
+        from kb_lib import manifests_dir, read_jsonl
+
+        rows = read_jsonl(manifests_dir() / "retained-files.jsonl")
+    except (ImportError, OSError, ValueError):
+        return None
+    for row in rows:
+        if str(row.get("asset_id") or "").strip() == asset_id:
+            return row
+    return None
+
+
+def _capture_retained_ref(ref: dict[str, Any]) -> dict[str, Any]:
+    asset_id = str(ref.get("value") or "").strip()
+    row = _retained_manifest_row(asset_id)
+    if row is None:
+        return {"type": "retained", "asset_id": asset_id, "resolvable": False}
+    status = str(row.get("status") or "active").strip()
+    stored_path = str(row.get("stored_path") or "").strip()
+    if stored_path:
+        path = Path(stored_path).expanduser()
+        if not path.is_file():
+            return {"type": "retained", "asset_id": asset_id, "status": status, "resolvable": False}
+        return {
+            "type": "retained",
+            "asset_id": asset_id,
+            "status": status,
+            "sha256": _sha256_file(path),
+            "resolvable": status == "active",
+        }
+    locator = str(row.get("locator") or "").strip()
+    return {
+        "type": "retained_reference",
+        "asset_id": asset_id,
+        "status": status,
+        "locator_sha256": hashlib.sha256(locator.encode("utf-8")).hexdigest() if locator else "",
+        "resolvable": bool(locator) and status in {"active", "external_reference"},
+    }
+
+
+def has_resolvable_evidence_ref(entry: dict[str, Any], workspace_dir: str | Path) -> bool:
+    refs = entry.get("evidence_refs")
+    if validate_evidence_refs(refs):
+        return False
+    workspace = Path(workspace_dir).expanduser().resolve(strict=False)
+    for ref in refs if isinstance(refs, list) else []:
+        ref_type = str(ref.get("type") or "")
+        if ref_type == "conversation":
+            return True
+        if ref_type == "git_commit":
+            repository = str(ref.get("repository") or ref.get("url") or "").strip()
+            if repository:
+                continue
+            snapshot = _capture_git_commit(ref, workspace)
+            if snapshot and snapshot.get("resolvable") is True:
+                return True
+        if ref_type == "retained":
+            if _capture_retained_ref(ref).get("resolvable") is True:
+                return True
+    return False
 
 
 def _run_git(repo: Path, *args: str) -> tuple[int, str, str]:
@@ -236,7 +344,17 @@ def capture_evidence_snapshots(entry: dict[str, Any], workspace_dir: str | Path)
     refs = entry.get("evidence_refs")
     if isinstance(refs, list):
         for ref in refs:
-            if not isinstance(ref, dict) or str(ref.get("type") or "") != "git_commit":
+            if not isinstance(ref, dict):
+                continue
+            if str(ref.get("type") or "") == "retained":
+                snapshots.append(_capture_retained_ref(ref))
+                continue
+            if str(ref.get("type") or "") != "git_commit":
+                continue
+            if str(ref.get("repository") or ref.get("url") or "").strip():
+                # Remote commits are verified by the publishing workflow and
+                # backed by current local source/sidecar snapshots. Do not turn
+                # them into an unresolvable snapshot in an unrelated local repo.
                 continue
             snapshot = _capture_git_commit(ref, workspace)
             if snapshot is not None:
@@ -339,6 +457,21 @@ def _verify_plain_snapshot(snapshot: dict[str, Any], workspace: Path) -> dict[st
     return {"state": "fresh", "reason": "content hash matches"}
 
 
+def _verify_retained_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    asset_id = str(snapshot.get("asset_id") or "").strip()
+    if not asset_id:
+        return {"state": "unresolvable", "reason": "retained asset ID is missing"}
+    current = _capture_retained_ref({"type": "retained", "value": asset_id})
+    if current.get("resolvable") is not True:
+        return {"state": "unresolvable", "reason": "retained asset no longer resolves through the manifest"}
+    if str(current.get("type") or "") != str(snapshot.get("type") or ""):
+        return {"state": "needs_recheck", "reason": "retained asset mode changed"}
+    digest_field = "sha256" if current.get("type") == "retained" else "locator_sha256"
+    if str(current.get(digest_field) or "") != str(snapshot.get(digest_field) or ""):
+        return {"state": "needs_recheck", "reason": "retained evidence changed since verification"}
+    return {"state": "fresh", "reason": "retained evidence matches the current manifest"}
+
+
 _STATE_PRIORITY = {
     "fresh": 0,
     "legacy_unverified": 1,
@@ -394,6 +527,8 @@ def verify_entry_evidence(
             result = _verify_git_commit(snapshot, workspace)
         elif snapshot_type in {"file", "directory"}:
             result = _verify_plain_snapshot(snapshot, workspace)
+        elif snapshot_type in {"retained", "retained_reference"}:
+            result = _verify_retained_snapshot(snapshot)
         elif snapshot_type == "missing":
             result = {"state": "unresolvable", "reason": "evidence was missing when snapshotted"}
         else:

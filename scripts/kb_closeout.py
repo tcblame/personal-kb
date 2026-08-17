@@ -21,6 +21,7 @@ import kb_session_brief
 import kb_adoption
 import kb_evidence
 from kb_lib import append_jsonl, find_entry, kb_base_dir, now_iso, read_jsonl, resolve_context, runtime_file
+from kb_runtime import attach_runtime_scope
 
 
 RETRIEVAL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -94,17 +95,21 @@ def _list_from_payload(value: Any) -> list[str]:
 
 
 def _linked_retrieval_ids(payload: dict[str, Any], args: argparse.Namespace) -> list[str]:
-    values = _dedupe(
-        [
+    values = [
+        str(value).strip()
+        for value in [
             *_list_from_payload(payload.get("linked_retrieval_ids")),
             *list(getattr(args, "linked_retrieval_id", []) or []),
         ]
-    )
+        if str(value).strip()
+    ]
     invalid = [value for value in values if not RETRIEVAL_ID_RE.fullmatch(value)]
     if invalid:
         raise ValueError(
             "linked retrieval ids must be 1-128 opaque characters using letters, digits, '.', '_', ':', or '-'"
         )
+    if len(set(values)) != len(values):
+        raise ValueError("linked retrieval ids must be unique within one closeout")
     return values
 
 
@@ -398,6 +403,17 @@ def build_closeout(args: argparse.Namespace) -> dict[str, Any]:
         rag_calls = _coerce_int(rag_calls_raw, 0)
         if rag_calls == 0 and (queries or hit_count > 0):
             raise ValueError("rag_calls cannot be 0 when queries or hit_count indicate KB usage")
+    if rag_calls < 0:
+        raise ValueError("rag_calls must be >= 0")
+
+    legacy_unlinked = bool(getattr(args, "legacy_allow_unlinked_retrievals", False))
+    if rag_calls == 0 and linked_retrieval_ids:
+        raise ValueError("linked retrieval ids require rag_calls > 0")
+    if rag_calls > 0 and len(linked_retrieval_ids) != rag_calls:
+        if not (legacy_unlinked and not linked_retrieval_ids):
+            raise ValueError(
+                "rag_calls must equal the number of unique linked retrieval ids"
+            )
 
     skipped_reason = args.reason.strip() or str(payload.get("skipped_reason", "") or "")
     if not (used or session_brief_used or written or updated) and not skipped_reason:
@@ -419,7 +435,7 @@ def build_closeout(args: argparse.Namespace) -> dict[str, Any]:
         or _coerce_bool(payload.get("session_brief_hit"), False)
     )
 
-    closeout = {
+    closeout = attach_runtime_scope({
         "closeout_id": (
             str(getattr(args, "closeout_id", "") or "").strip()
             or str(payload.get("closeout_id") or "").strip()
@@ -445,9 +461,10 @@ def build_closeout(args: argparse.Namespace) -> dict[str, Any]:
             "source": str(getattr(ctx, "routing_source", "unknown")),
             "candidate_repos": list(getattr(ctx, "candidate_repos", ())),
         },
-    }
-    if linked_retrieval_ids:
-        closeout["linked_retrieval_ids"] = linked_retrieval_ids
+        "linked_retrieval_ids": linked_retrieval_ids,
+    })
+    if legacy_unlinked and rag_calls > 0 and not linked_retrieval_ids:
+        closeout["legacy_unlinked_retrievals"] = True
     if session_brief_used:
         closeout["session_brief_used_entry_ids"] = session_brief_used
     if hit_entry_ids:
@@ -503,6 +520,11 @@ def main(argv: list[str]) -> int:
         action="append",
         default=[],
         help="Runtime retrieval ID handled by this parent closeout; repeatable",
+    )
+    parser.add_argument(
+        "--legacy-allow-unlinked-retrievals",
+        action="store_true",
+        help=argparse.SUPPRESS,
     )
     output_group = parser.add_mutually_exclusive_group()
     output_group.add_argument("--verbose", action="store_true", help="Print one minimal closeout summary")

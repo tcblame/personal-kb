@@ -10,6 +10,7 @@ from typing import Any
 
 from kb_adoption import ADOPTION_EVENT, HEAT_EFFECTS, adoption_events_path
 from kb_lib import append_jsonl, kb_base_dir, load_config, now_iso, read_jsonl, runtime_file
+from kb_runtime import attach_runtime_scope
 from kb_sensitive_scan import sensitive_findings
 
 
@@ -232,7 +233,10 @@ def prepare(args: argparse.Namespace) -> int:
         brief["status"] = "ready" if should_challenge else "skipped"
 
     if args.enqueue and should_challenge and not missing and not unverified_adoption_ids:
-        append_jsonl(_events_path(), {"event": "challenge_queued", "ts": now_iso(), **brief})
+        append_jsonl(
+            _events_path(),
+            attach_runtime_scope({"event": "challenge_queued", "ts": now_iso(), **brief}),
+        )
     sys.stdout.write(json.dumps(brief, ensure_ascii=False, indent=2) + "\n")
     return 1 if missing or unverified_adoption_ids else 0
 
@@ -324,7 +328,7 @@ def propose(args: argparse.Namespace) -> int:
             sys.stdout.write(json.dumps({"status": "duplicate", "proposal_id": event.get("proposal_id", ""), "fingerprint": fingerprint}, ensure_ascii=False) + "\n")
             return 0
 
-    event = {
+    event = attach_runtime_scope({
         "event": "challenge_proposal",
         "status": "pending",
         "ts": now_iso(),
@@ -332,7 +336,7 @@ def propose(args: argparse.Namespace) -> int:
         "fingerprint": fingerprint,
         "task_id": str(queued.get("task_id", "")),
         "payload": payload,
-    }
+    })
     append_jsonl(_events_path(), event)
     sys.stdout.write(json.dumps({"status": "pending", "proposal_id": proposal_id, "fingerprint": fingerprint}, ensure_ascii=False) + "\n")
     return 0
@@ -352,7 +356,7 @@ def resolve(args: argparse.Namespace) -> int:
     if decision in {"accepted", "rejected"} and not verified_against:
         sys.stderr.write("accepted or rejected resolutions require --verified-against\n")
         return 2
-    append_jsonl(_events_path(), {
+    append_jsonl(_events_path(), attach_runtime_scope({
         "event": "challenge_resolution",
         "ts": now_iso(),
         "proposal_id": proposal_id,
@@ -360,7 +364,7 @@ def resolve(args: argparse.Namespace) -> int:
         "verified_against": verified_against,
         "reason": args.reason.strip(),
         "kb_write_applied": False,
-    })
+    }))
     sys.stdout.write(json.dumps({"status": "resolved", "proposal_id": proposal_id, "decision": decision, "kb_write_applied": False}, ensure_ascii=False) + "\n")
     return 0
 

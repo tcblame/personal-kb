@@ -15,6 +15,7 @@ from datetime import datetime
 from kb_kinds import DEFAULT_KIND, VALID_KINDS, legacy_type_to_kind
 from kb_sensitive_scan import sensitive_findings
 import kb_evidence
+import kb_record_validation
 
 # Windows UTF-8 输出修复
 if sys.platform == 'win32' and hasattr(sys.stdout, 'buffer'):
@@ -285,24 +286,11 @@ def _apply_quality_defaults(entry: dict[str, Any], *, ts: str, workspace_dir: Pa
 
 
 def _strict_quality_errors(entry: dict[str, Any], *, workspace_dir: Path) -> list[str]:
-    errors: list[str] = []
-    aliases = [item for item in _as_list(entry.get("aliases")) if str(item).strip()]
-    triggers = [item for item in _as_list(entry.get("trigger_terms")) if str(item).strip()]
-    sources = [item for item in _as_list(entry.get("source_paths")) if str(item).strip()]
-    refs = [item for item in _as_list(entry.get("evidence_refs")) if item]
-    if len(aliases) < 2 or len(aliases) > 8:
-        errors.append("aliases 必须有 2-8 个")
-    if len(triggers) < 3 or len(triggers) > 15:
-        errors.append("trigger_terms 必须有 3-15 个")
-    if not _resolved_sources(entry, workspace_dir=workspace_dir) and not any(_valid_evidence_ref(value) for value in refs):
-        errors.append("必须提供当前可解析的 source_paths 或合法 evidence_refs")
-    if refs and not all(_valid_evidence_ref(value) for value in refs):
-        errors.append("evidence_refs 必须是包含 type/value 的合法引用")
-    if any(str(value).startswith(("commit:", "conversation:")) for value in sources):
-        errors.append("commit/conversation 引用必须放入 evidence_refs，不能放在 source_paths")
-    if entry.get("artifact_locator") and entry.get("kind") != "map":
-        errors.append("artifact_locator 必须使用 kind=map")
-    return errors
+    return kb_record_validation.strict_record_errors(
+        entry,
+        workspace_dir=workspace_dir,
+        require_fresh_snapshot=True,
+    )
 
 
 def _write_success_summary(action: str, ctx: Any, entry: dict[str, Any], *, reason: str = "") -> None:
@@ -591,7 +579,15 @@ def _main(argv: list[str]) -> int:
         )
         return 4
 
-    # --smart-field-check：先给字段建议，再执行长期知识严格质量门禁。
+    quality_errors = _strict_quality_errors(entry, workspace_dir=Path(ctx.workspace_dir))
+    if quality_errors:
+        sys.stderr.write("❌ 严格质量门禁失败:\n")
+        for error in quality_errors:
+            sys.stderr.write(f"   • {error}\n")
+        return 3
+
+    # --smart-field-check only adds semantic suggestions. The durable evidence
+    # and metadata gate applies to every remember operation.
     if args.smart_field_check:
         try:
             schema_script = Path(__file__).with_name("kb_schema_discover.py")
@@ -622,13 +618,6 @@ def _main(argv: list[str]) -> int:
         except (OSError, subprocess.TimeoutExpired):
             pass
 
-        quality_errors = _strict_quality_errors(entry, workspace_dir=Path(ctx.workspace_dir))
-        if quality_errors:
-            sys.stderr.write("❌ 严格质量门禁失败:\n")
-            for error in quality_errors:
-                sys.stderr.write(f"   • {error}\n")
-            return 3
-
     # 固定 bucket 锁覆盖“查重/判断/更新或追加”的完整事务。
     with bucket_lock(ctx.kb_path):
         related_entries = search_related_entries(ctx.kb_path, entry)
@@ -657,6 +646,17 @@ def _main(argv: list[str]) -> int:
                     "schema_version": entry.get("schema_version"),
                     "evidence_snapshots": entry.get("evidence_snapshots"),
                 }
+                candidate = dict(old_entry)
+                candidate.update(updates)
+                replacement_errors = _strict_quality_errors(
+                    candidate,
+                    workspace_dir=Path(ctx.workspace_dir),
+                )
+                if replacement_errors:
+                    sys.stderr.write("❌ 自动替换证据校验失败:\n")
+                    for error in replacement_errors:
+                        sys.stderr.write(f"   • {error}\n")
+                    return 3
                 if update_entry_in_place(ctx.kb_path, old_entry["id"], updates, lock_held=True):
                     from kb_lib import read_jsonl
 

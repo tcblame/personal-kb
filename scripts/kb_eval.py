@@ -16,7 +16,8 @@ PYTHON_FUNCTION_COMMANDS: dict[str, tuple[str, str]] = {
     "audit-runtime": ("kb_audit_runtime_value", "main"),
     "audit-sessions": ("kb_audit_codex_sessions", "main"),
     "effectiveness": ("kb_record_codex_effectiveness", "main"),
-    "release-check": ("kb_release", "main"),
+    "release-build": ("kb_release", "main"),
+    "release-check": ("kb_release", "check_main"),
 }
 SCRIPT_COMMANDS = {
     "smoke": "kb_smoke_test.py",

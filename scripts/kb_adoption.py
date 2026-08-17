@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from kb_lib import append_jsonl, kb_base_dir, now_iso, read_jsonl, runtime_file
+from kb_runtime import attach_runtime_scope, is_test_event, runtime_scope
 
 
 ADOPTION_EVENT = "kb_adoption"
@@ -45,7 +46,7 @@ def append_adoption_event(
         allowed = ", ".join(sorted(VALID_EFFECTS))
         raise ValueError(f"effect must be one of: {allowed}")
 
-    event = {
+    event = attach_runtime_scope({
         "event": ADOPTION_EVENT,
         "event_id": _required_text(event_id, "event_id"),
         "entry_id": _required_text(entry_id, "entry_id"),
@@ -54,7 +55,7 @@ def append_adoption_event(
         "branch": branch.strip() if isinstance(branch, str) else "",
         "session_id": session_id.strip() if isinstance(session_id, str) else "",
         "ts": ts.strip() if isinstance(ts, str) and ts.strip() else now_iso(),
-    }
+    })
     append_jsonl(adoption_events_path(base_dir), event)
     return event
 
@@ -71,13 +72,22 @@ def _timestamp_key(value: Any) -> float | None:
     return parsed.timestamp()
 
 
-def load_adoption_stats(base_dir: Path | None = None) -> dict[str, dict[str, Any]]:
+def load_adoption_stats(
+    base_dir: Path | None = None,
+    *,
+    include_test: bool | None = None,
+) -> dict[str, dict[str, Any]]:
     """Aggregate adoption events, deduplicating physical retries by event_id."""
     stats: dict[str, dict[str, Any]] = {}
     latest_heat_keys: dict[str, float] = {}
     seen_event_ids: set[str] = set()
 
+    effective_include_test = (
+        runtime_scope()["source"] == "test" if include_test is None else include_test
+    )
     for event in read_jsonl(adoption_events_path(base_dir)):
+        if not effective_include_test and is_test_event(event):
+            continue
         event_type = _optional_text(event.get("event"))
         if event_type and event_type != ADOPTION_EVENT:
             continue
