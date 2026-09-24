@@ -42,6 +42,13 @@ python3 scripts/kb_smoke_test.py . --root-layout
 - 低副作用：检索只读，成功 closeout 默认静默。
 - 可审计：gold case、历史回放、closeout 和确认采用四层验证。
 
+## v2 记忆系统路线
+
+当前版本已经能保存经过验证的长期记录，但还在从“记录 + RAG”演进到统一的可复用记忆生命周期。设计目标是让需求、bug、运行时观察、检索结果和验证结果都先进入同一个事件入口，再由证据门禁升级为可复用对象，并通过关系、时间和混合检索恢复。
+
+- [v2 架构设计](docs/memory-system-v2-design.md)：事件、对象、实体、关系、Formation/Recall/Maintenance、单入口 CLI 和 P0-P4 实施顺序。
+- [外部方案学习记录](docs/research-supergoal-and-memory-systems.md)：`supergoal`、图谱/向量记忆系统的借鉴边界。
+
 ## 怎么证明有效
 
 不要只给一个“采用率”。建议公开以下聚合口径：
