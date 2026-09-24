@@ -1363,7 +1363,10 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
 
     payload = {
         "retrieval_id": retrieval_id,
+        "session_id": str(getattr(args, "session_id", "") or "").strip(),
+        "topic_id": str(getattr(args, "topic_id", "") or "").strip(),
         "query": args.query,
+        "query_chars": len(args.query),
         "hit_count": len(items),
         "limit": requested_limit,
         "mode": "read_only_rag_context",
@@ -1442,6 +1445,8 @@ def main(argv: list[str]) -> int:
         default="",
         help="Test-only opaque correlation ID; production IDs are generated automatically",
     )
+    parser.add_argument("--session-id", default="", help="Optional caller session identifier for audit correlation")
+    parser.add_argument("--topic-id", default="", help="Optional independent topic identifier for budget accounting")
     parser.add_argument("--repo", default="", help="Override repo bucket")
     parser.add_argument("--branch", default="", help="Override branch bucket")
     parser.add_argument(

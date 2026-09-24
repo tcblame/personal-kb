@@ -448,6 +448,7 @@ def build_closeout(args: argparse.Namespace) -> dict[str, Any]:
         "repo": ctx.repo_name,
         "branch": ctx.branch,
         "session_id": str(getattr(args, "session_id", "") or "").strip() or str(payload.get("session_id") or "").strip(),
+        "topic_id": str(getattr(args, "topic_id", "") or "").strip() or str(payload.get("topic_id") or "").strip(),
         "rag_calls": rag_calls,
         "queries": queries,
         "hit_count": hit_count,
@@ -514,6 +515,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--session-brief-hit", action="store_true", help="Mark that this task hit a recent session brief during retrieval")
     parser.add_argument("--session-brief-help", action="store_true", help="Mark that a recent session brief materially helped this task")
     parser.add_argument("--session-id", default="", help="Optional runtime session identifier")
+    parser.add_argument("--topic-id", default="", help="Optional independent topic identifier for per-topic budgets")
     parser.add_argument("--closeout-id", default="", help="Idempotency key for retrying the same closeout")
     parser.add_argument(
         "--linked-retrieval-id",
