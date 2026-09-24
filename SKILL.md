@@ -24,6 +24,8 @@ Also retrieve when an action depends on an unfamiliar user shorthand or ambiguou
 
 Skip ordinary RAG when current evidence fully answers a one-off question, a current log already determines a diagnosis, or the task is unrelated Skill/MCP maintenance. An explicit Personal KB audit or maintenance request triggers this Skill, but runtime audit should read `references/audit.md` and inspect session/runtime evidence directly; it does not require a self-referential long-term RAG query.
 
+When Cursor is the main client, use the read-only Cursor transcript auditor before drawing usage conclusions. Count executable Shell tool requests separately from runtime results: a transcript request without a returned tool result is `execution_status=unknown`, never a successful retrieval. Keep main sessions and subagents separate, and join a Cursor session to runtime only through one unique `closeout_id` (or an explicit matching `session_id`); do not infer adoption from command text, a Skill mention, or a nearby timestamp. The auditor is `scripts/kb_audit_cursor_sessions.py` and accepts one or more Cursor project roots plus an optional private `closeout.jsonl`.
+
 A request to remember a newly established rule is maintenance, not by itself a reason for ordinary RAG. Verify the new rule against current evidence, then check for an existing record during the write/update flow so it is updated instead of duplicated. Retrieve first only when the requested rule also depends on an older decision, mapping, incident, or other cross-session fact.
 
 Explicit task constraints win. If a task forbids Personal KB, run no KB command. If it forbids writes but allows KB reading, use only read-only retrieval or audit commands.
@@ -59,6 +61,8 @@ For each topic:
 2. Run at most one initial RAG query through the chosen retrieval owner for each history-dependent topic, using only that topic's concrete anchors.
 3. Reuse selected hints only within that topic. A retrieval for one topic never consumes or satisfies another topic's budget, even when both topics appeared in the same user message.
 4. Within the same topic, retrieve again only when the user introduces a new durable anchor, asks for broader history after a zero-hit query, current evidence contradicts the prior result, or context was lost and no selected result remains. A later independent topic starts its own budget and is not a retry.
+
+Pass `--session-id` and `--topic-id` on retrieve and closeout when the caller has them. `topic_id` is the independent budget key; it does not prove that a hit was useful. A topic with sufficient current evidence may skip retrieval and close out with a concrete `--reason`/`skipped_reason` only when the task otherwise has no adopted or written entry.
 
 Do not combine unrelated topic anchors into one query. After all topics are integrated, run one parent closeout for the whole request and link every retrieval ID that was actually used. A request that fully skipped KB needs no closeout.
 
