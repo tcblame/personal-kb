@@ -243,8 +243,20 @@ def _worktree_state(repo: Path, relative: str) -> str:
     code, unmerged, _ = _run_git(repo, "ls-files", "-u", "--", relative)
     if code == 0 and unmerged:
         return "conflicted"
-    code, status, _ = _run_git(repo, "status", "--porcelain=v1", "--untracked-files=all", "--", relative)
-    if code != 0 or not status:
+    # `git status --porcelain` uses the first two columns to distinguish
+    # staged (`M `) from unstaged (` M`) changes.  Do not call `_run_git`
+    # here: its general-purpose `.strip()` would remove the significant
+    # leading status space and turn every unstaged edit into `staged`.
+    proc = subprocess.run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all", "--", relative],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    status = proc.stdout.rstrip("\r\n") if proc.returncode == 0 else ""
+    if proc.returncode != 0 or not status:
         return "clean"
     states = [line[:2] for line in status.splitlines() if len(line) >= 2]
     conflict_codes = {"DD", "AU", "UD", "UA", "DU", "AA", "UU"}

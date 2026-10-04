@@ -73,6 +73,9 @@ FORBIDDEN_DATA_DIRECTORIES = {
     "storage",
 }
 PUBLIC_TESTS = {
+    "kb_session_review_test.py",
+    "kb_audit_codex_sessions_test.py",
+    "kb_audit_cursor_sessions_test.py",
     "kb_smoke_test.py",
     "kb_storage_test.py",
     "kb_challenge_test.py",

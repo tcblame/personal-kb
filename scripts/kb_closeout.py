@@ -12,9 +12,9 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-if sys.platform == "win32" and hasattr(sys.stdout, "buffer"):
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace", line_buffering=True)
+from kb_lib import configure_utf8_streams
+
+configure_utf8_streams()
 
 import kb_update
 import kb_session_brief
@@ -25,6 +25,13 @@ from kb_runtime import attach_runtime_scope
 
 
 RETRIEVAL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+MISS_REASONS = {
+    "trigger_missed",
+    "query_too_weak",
+    "no_verified_hit",
+    "execution_failed",
+    "unknown",
+}
 
 
 def _dedupe(values: list[str]) -> list[str]:
@@ -92,6 +99,52 @@ def _list_from_payload(value: Any) -> list[str]:
     if isinstance(value, str) and value.strip():
         return [value.strip()]
     return []
+
+
+def _parse_rejection_specs(values: Any) -> dict[str, str]:
+    """Parse CLI ``entry_id=reason`` feedback into a stable mapping."""
+    specs = values if isinstance(values, list) else [values] if isinstance(values, str) else []
+    parsed: dict[str, str] = {}
+    for raw in specs:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        if "=" in text:
+            entry_id, reason = text.split("=", 1)
+        elif ":" in text:
+            entry_id, reason = text.split(":", 1)
+        else:
+            raise ValueError("rejection reason must use entry_id=reason")
+        entry_id = entry_id.strip()
+        reason = _clip(reason.strip(), 160)
+        if not entry_id or not reason:
+            raise ValueError("rejection reason requires a non-empty entry ID and reason")
+        parsed[entry_id] = reason
+    return parsed
+
+
+def _compact_retrieval_items(value: Any) -> list[dict[str, Any]]:
+    """Keep only ranking telemetry needed by runtime quality audits."""
+    if isinstance(value, dict):
+        value = value.get("items")
+    if not isinstance(value, list):
+        return []
+    compact: list[dict[str, Any]] = []
+    for item in value[:20]:
+        if not isinstance(item, dict):
+            continue
+        entry_id = str(item.get("entry_id") or item.get("id") or "").strip()
+        if not entry_id:
+            continue
+        compact.append(
+            {
+                "entry_id": entry_id,
+                "kind": str(item.get("kind") or ""),
+                "freshness_state": str(item.get("freshness_state") or "legacy_unverified"),
+                "trust_tier": str(item.get("trust_tier") or ""),
+            }
+        )
+    return compact
 
 
 def _linked_retrieval_ids(payload: dict[str, Any], args: argparse.Namespace) -> list[str]:
@@ -344,6 +397,16 @@ def apply_session_brief(
 
 def build_closeout(args: argparse.Namespace) -> dict[str, Any]:
     payload = _read_json_payload(args)
+    retrieval_items = _compact_retrieval_items(
+        payload.get("retrieval_items", payload.get("retrieval_snapshot"))
+    )
+    retrieval_items_json = str(getattr(args, "retrieval_items_json", "") or "")
+    if retrieval_items_json:
+        try:
+            inline_items = json.loads(retrieval_items_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"invalid --retrieval-items-json: {exc}") from exc
+        retrieval_items = _compact_retrieval_items(inline_items)
     linked_retrieval_ids = _linked_retrieval_ids(payload, args)
     ctx = resolve_context(
         cwd=Path.cwd(),
@@ -391,7 +454,51 @@ def build_closeout(args: argparse.Namespace) -> dict[str, Any]:
         ]
     )
 
+    rejected_hit_ids = _dedupe(
+        [
+            *_list_from_payload(payload.get("rejected_hit_ids")),
+            *list(getattr(args, "rejected_hit_id", []) or []),
+        ]
+    )
+    rejection_reasons: dict[str, str] = {}
+    payload_reasons = payload.get("rejection_reasons")
+    if payload_reasons is not None:
+        if not isinstance(payload_reasons, dict):
+            raise ValueError("rejection_reasons must be an object mapping entry IDs to reasons")
+        for entry_id, reason in payload_reasons.items():
+            key = str(entry_id).strip()
+            value = _clip(str(reason or "").strip(), 160)
+            if not key or not value:
+                raise ValueError("rejection_reasons requires non-empty entry IDs and reasons")
+            rejection_reasons[key] = value
+    rejection_reasons.update(
+        _parse_rejection_specs(getattr(args, "rejection_reason", []))
+    )
+    for entry_id in rejection_reasons:
+        if entry_id not in rejected_hit_ids:
+            rejected_hit_ids.append(entry_id)
+
+    miss_reason = str(payload.get("miss_reason") or getattr(args, "miss_reason", "") or "").strip()
+    if miss_reason and miss_reason not in MISS_REASONS:
+        raise ValueError(
+            "miss_reason must be one of: " + ", ".join(sorted(MISS_REASONS))
+        )
+    if hit_entry_ids:
+        invalid_rejected = [entry_id for entry_id in rejected_hit_ids if entry_id not in set(hit_entry_ids)]
+        if invalid_rejected:
+            raise ValueError(
+                "rejected entries must belong to allowed hit ids: " + ", ".join(invalid_rejected)
+            )
+    adopted_ids_for_feedback = set(adopted)
+    overlap = sorted(adopted_ids_for_feedback.intersection(rejected_hit_ids))
+    if overlap:
+        raise ValueError("an entry cannot be both adopted and rejected: " + ", ".join(overlap))
+
     hit_count = _coerce_int(payload.get("hit_count", args.hit_count), 0)
+    if retrieval_items and "hit_count" not in payload and args.hit_count == 0:
+        hit_count = len(retrieval_items)
+    if hit_count < 0:
+        raise ValueError("hit_count must be >= 0")
 
     rag_calls_explicit = "rag_calls" in payload or args.rag_calls is not None
     rag_calls_raw = payload.get("rag_calls", args.rag_calls)
@@ -407,16 +514,30 @@ def build_closeout(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("rag_calls must be >= 0")
 
     legacy_unlinked = bool(getattr(args, "legacy_allow_unlinked_retrievals", False))
+    attempts = []
+    for spec in getattr(args, "unresolved_attempt", []) or []:
+        attempt_id, separator, state = spec.partition("=")
+        if not separator or not RETRIEVAL_ID_RE.fullmatch(attempt_id) or state not in {"pending", "failed", "unavailable", "aborted", "unknown"}:
+            raise ValueError("--unresolved-attempt requires ID=pending|failed|unavailable|aborted|unknown")
+        if any(a["attempt_id"] == attempt_id for a in attempts) or attempt_id in linked_retrieval_ids:
+            raise ValueError("attempt IDs must be unique and separate from linked retrieval IDs")
+        attempts.append({"attempt_id": attempt_id, "state": state})
+    if attempts and not rag_calls_explicit:
+        rag_calls = len(linked_retrieval_ids) + len(attempts)
+    if attempts and not linked_retrieval_ids and hit_count:
+        raise ValueError("unresolved attempts alone cannot supply confirmed hits")
     if rag_calls == 0 and linked_retrieval_ids:
         raise ValueError("linked retrieval ids require rag_calls > 0")
-    if rag_calls > 0 and len(linked_retrieval_ids) != rag_calls:
+    if len(linked_retrieval_ids) + len(attempts) != rag_calls:
         if not (legacy_unlinked and not linked_retrieval_ids):
             raise ValueError(
-                "rag_calls must equal the number of unique linked retrieval ids"
+                "rag_calls must equal unique linked retrieval ids plus unresolved attempts"
             )
 
     skipped_reason = args.reason.strip() or str(payload.get("skipped_reason", "") or "")
-    if not (used or session_brief_used or written or updated) and not skipped_reason:
+    if not (used or session_brief_used or written or updated) and not skipped_reason and not (
+        rejected_hit_ids or miss_reason
+    ):
         raise ValueError("reason/skipped_reason is required when no used/written/updated entry ids are recorded")
 
     if hit_entry_ids:
@@ -466,10 +587,29 @@ def build_closeout(args: argparse.Namespace) -> dict[str, Any]:
     })
     if legacy_unlinked and rag_calls > 0 and not linked_retrieval_ids:
         closeout["legacy_unlinked_retrievals"] = True
+    if attempts:
+        closeout["unresolved_retrieval_attempts"] = attempts
+        closeout["completed_retrieval_count"] = len(linked_retrieval_ids)
+    review = getattr(args, "memory_review", "")
+    if review:
+        review_reason = str(getattr(args, "memory_review_reason", "") or "").strip()
+        if not review_reason:
+            raise ValueError("--memory-review-reason is required with --memory-review")
+        if (review == "written" and not written) or (review == "updated" and not updated):
+            raise ValueError("written/updated memory review requires the corresponding entry IDs")
+        closeout["memory_review"] = {"disposition": review, "reason": _clip(review_reason)}
     if session_brief_used:
         closeout["session_brief_used_entry_ids"] = session_brief_used
     if hit_entry_ids:
         closeout["hit_entry_ids"] = hit_entry_ids
+    if retrieval_items:
+        closeout["retrieval_items"] = retrieval_items
+    if rejected_hit_ids:
+        closeout["rejected_hit_ids"] = rejected_hit_ids
+    if rejection_reasons:
+        closeout["rejection_reasons"] = rejection_reasons
+    if miss_reason:
+        closeout["miss_reason"] = miss_reason
     if rag_calls_inferred:
         closeout["rag_calls_inferred"] = True
     closeout["session_brief_hit"] = session_brief_hit
@@ -490,6 +630,11 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description="Append AI-only personal-kb closeout state.")
     parser.add_argument("--query", action="append", default=[], help="RAG query used in this task; repeatable")
     parser.add_argument("--hit-count", type=int, default=0, help="Total RAG hit count observed by the AI")
+    parser.add_argument(
+        "--retrieval-items-json",
+        default="",
+        help="Optional JSON array/object of compact RAG hit telemetry for quality auditing",
+    )
     parser.add_argument("--rag-calls", type=int, default=None, help="Number of RAG/KB calls in this task")
     parser.add_argument("--used", action="append", default=[], help="Legacy adopted entry ID; heats the record")
     parser.add_argument("--used-locate", action="append", default=[], help="Entry only helped locate evidence; record adoption without heat")
@@ -499,6 +644,25 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--written", action="append", default=[], help="Entry ID written by the AI; repeatable")
     parser.add_argument("--updated", action="append", default=[], help="Entry ID updated by the AI; repeatable")
     parser.add_argument("--allowed-hit-id", action="append", default=[], help="Allowed hit candidate entry ID for validating --used; repeatable")
+    parser.add_argument(
+        "--rejected-hit-id",
+        action="append",
+        default=[],
+        help="Hit candidate explicitly rejected after verification; repeatable",
+    )
+    parser.add_argument(
+        "--rejection-reason",
+        action="append",
+        default=[],
+        metavar="ENTRY_ID=REASON",
+        help="Why a hit was rejected; repeatable",
+    )
+    parser.add_argument(
+        "--miss-reason",
+        default="",
+        choices=sorted(MISS_REASONS),
+        help="Why a retrieval was missed or returned no verified hit",
+    )
     parser.add_argument("--reason", default="", help="Reason for no use/write/update when skipped")
     parser.add_argument("--repo", default="", help="Override repo bucket for closeout context")
     parser.add_argument("--branch", default="", help="Override branch bucket for closeout context")
@@ -515,7 +679,13 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--session-brief-hit", action="store_true", help="Mark that this task hit a recent session brief during retrieval")
     parser.add_argument("--session-brief-help", action="store_true", help="Mark that a recent session brief materially helped this task")
     parser.add_argument("--session-id", default="", help="Optional runtime session identifier")
-    parser.add_argument("--topic-id", default="", help="Optional independent topic identifier for per-topic budgets")
+    parser.add_argument("--topic-id", default="", help="Optional independent topic identifier")
+    parser.add_argument("--unresolved-attempt", action="append", default=[], metavar="ID=STATE",
+                        help="Record a pending, failed, unavailable, aborted or unknown attempt without inventing a retrieval ID")
+    parser.add_argument("--memory-review", default="", choices=["not_reusable", "already_recorded", "pending_verification",
+                        "blocked_by_instruction", "rejected_evidence", "written", "updated"],
+                        help="Optional outcome of this task's durable-memory assessment; never promotes a record")
+    parser.add_argument("--memory-review-reason", default="", help="Evidence or reason for the assessment")
     parser.add_argument("--closeout-id", default="", help="Idempotency key for retrying the same closeout")
     parser.add_argument(
         "--linked-retrieval-id",

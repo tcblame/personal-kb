@@ -16,7 +16,6 @@ kb_schema_discover.py - KB 字段发现与软性建议脚本
 from __future__ import annotations
 
 import argparse
-import io
 import json
 import sys
 from collections import Counter, defaultdict
@@ -24,9 +23,9 @@ from pathlib import Path
 from typing import Any
 
 # Windows UTF-8 输出修复
-if sys.platform == 'win32' and hasattr(sys.stdout, 'buffer'):
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace', line_buffering=True)
+from kb_lib import configure_utf8_streams
+
+configure_utf8_streams()
 
 from kb_kinds import VALID_KINDS
 from kb_lib import kb_base_dir, read_jsonl

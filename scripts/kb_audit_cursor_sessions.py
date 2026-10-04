@@ -187,6 +187,8 @@ def reconcile(sessions: list[dict], runtime: list[dict], start: date, end: date)
 
 
 def build_report(paths: list[Path], start: date, end: date, runtime: list[dict] | None = None) -> dict:
+    child_ids = {p.stem for p in paths if "subagents" in p.parts}
+    paths = [p for p in paths if "subagents" in p.parts or p.stem not in child_ids]
     sessions = [audit_session(p) for p in sorted(set(p.resolve() for p in paths))
                 if start <= datetime.fromtimestamp(p.stat().st_mtime).date() <= end]
     totals = {}

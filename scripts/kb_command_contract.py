@@ -6,6 +6,7 @@ from pathlib import Path
 
 
 DAILY_COMMANDS: dict[str, tuple[str, str, list[str]]] = {
+    "version": ("kb_version", "main", []),
     "retrieve": ("kb_rag_context", "main", []),
     "search": ("kb_search", "main", []),
     "remember": ("kb_add", "main", []),
@@ -15,6 +16,7 @@ DAILY_COMMANDS: dict[str, tuple[str, str, list[str]]] = {
     "evidence": ("kb_retain_file", "main", []),
     "closeout": ("kb_closeout", "main", []),
     "challenge": ("kb_challenge", "main", []),
+    "curate-sessions": ("kb_session_curate", "main", []),
     "where": ("kb_whereami", "main", []),
 }
 
@@ -24,6 +26,7 @@ KB_SCRIPT_PATTERNS = {
     "kb_closeout": "kb_closeout.py",
     "kb_add": "kb_add.py",
     "kb_update": "kb_update.py",
+    "kb_session_curate": "kb_session_curate.py",
 }
 KB_WRAPPER_COMMANDS = {
     command: module
@@ -176,3 +179,34 @@ def direct_or_wrapper_scripts(command: str) -> list[str]:
     if wrapped and wrapped[0] not in detected:
         detected.append(wrapped[0])
     return detected
+
+
+def retrieval_linkage_complete(row: dict) -> bool:
+    """Unresolved attempts are accounted for, but are never successful results."""
+    try:
+        calls = int(row.get("rag_calls") or 0)
+    except (TypeError, ValueError):
+        return False
+    ids = row.get("linked_retrieval_ids") or []
+    attempts = row.get("unresolved_retrieval_attempts") or []
+    if not isinstance(ids, list) or not isinstance(attempts, list):
+        return False
+    if not all(isinstance(i, str) and i for i in ids):
+        return False
+    attempt_ids = []
+    for attempt in attempts:
+        if not isinstance(attempt, dict) or attempt.get("state") not in {"pending", "failed", "unavailable", "aborted", "unknown"}:
+            return False
+        ident = attempt.get("attempt_id")
+        if not isinstance(ident, str) or not ident or ident in ids or ident in attempt_ids:
+            return False
+        attempt_ids.append(ident)
+    return calls == len(set(ids)) + len(attempt_ids)
+
+
+def retrieval_linkage_present(row: dict) -> bool:
+    """Historical missing-link metric: some receipt, or explicitly accounted attempts.
+
+    Partial legacy linkage is not reclassified as fully missing.
+    """
+    return bool(row.get('linked_retrieval_ids')) or retrieval_linkage_complete(row)

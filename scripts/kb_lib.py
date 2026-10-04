@@ -27,6 +27,16 @@ class PersonalKbConfigError(ValueError):
     """Raised when the canonical Personal KB configuration is invalid."""
 
 
+def configure_utf8_streams() -> None:
+    """Configure Windows output in place; repeated imports must not close it."""
+    if sys.platform != "win32":
+        return
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+
+
 @dataclass(frozen=True)
 class StorageLayout:
     """Canonical single-root layout derived from config.json.

@@ -51,6 +51,9 @@ CONTEXT_PREFIXES = (
     "<skills_instructions>",
     "<subagent_notification>",
     "<turn_aborted>",
+    "<recommended_plugins>",
+    "<external_codex_apps_open_page>",
+    "<system_reminder>",
 )
 CUSTOM_EXEC_CMD_RE = re.compile(
     r"(?:[\"']cmd[\"']|\bcmd)\s*:\s*(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)",
@@ -59,7 +62,7 @@ CUSTOM_EXEC_CMD_RE = re.compile(
 UUID_RE = re.compile(
     r"(?i)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
 )
-PARSER_VERSION = "codex-shell-v10"
+PARSER_VERSION = "codex-shell-v12"
 HUMAN_LABEL_VALUES = frozenset({"confirmed_missed_retrieval", "auditor_false_positive"})
 
 
@@ -172,14 +175,13 @@ def _user_response_text(content: Any) -> str:
 
 
 def _execution_success(output: str) -> bool | None:
-    match = EXIT_RE.search(output or "")
-    if match:
-        try:
-            return int(match.group(1)) == 0
-        except ValueError:
-            return None
-    if re.search(r"\bScript completed\b", output or "", re.I):
-        return True
+    # Outer JS completion is not proof that any nested shell command succeeded.
+    exits = [int(m.group(1)) for m in EXIT_RE.finditer(output or "")]
+    exits.extend(p.get("exit_code") for t in session_output.nested_output_texts(output)
+                 for p in session_output.json_dicts_from_output(t)
+                 if isinstance(p.get("exit_code"), int))
+    if exits and len(set(exits)) == 1:
+        return exits[0] == 0
     if re.search(r"\b(?:Script failed|command failed)\b", output or "", re.I):
         return False
     return None
@@ -220,13 +222,8 @@ def _decode_js_string(literal: str) -> str:
 
 
 def _custom_exec_commands(source: str) -> list[str]:
-    if "tools.exec_command" not in (source or ""):
-        return []
-    return [
-        command
-        for match in CUSTOM_EXEC_CMD_RE.finditer(source)
-        if (command := _decode_js_string(match.group(1)))
-    ]
+    from kb_exec_parse import commands
+    return commands(source)
 
 
 def _call_commands(payload: dict[str, Any]) -> tuple[list[str], str]:
@@ -302,30 +299,9 @@ def _as_int(value: Any) -> int:
         return 0
 
 
-def _filename_session_id(path: Path) -> str:
-    matches = UUID_RE.findall(path.stem)
-    return matches[-1].lower() if matches else ""
-
-
-def _select_session_meta(path: Path, rows: list[dict[str, Any]]) -> dict[str, Any]:
-    metas = [
-        payload
-        for row in rows
-        if row.get("type") == "session_meta"
-        and isinstance((payload := row.get("payload")), dict)
-    ]
-    if not metas:
-        return {}
-
-    filename_id = _filename_session_id(path)
-    if filename_id:
-        for meta in metas:
-            if str(meta.get("id") or "").lower() == filename_id:
-                return meta
-
-    # Old/non-rollout fixture names have no UUID. The first metadata row is the
-    # rollout's own metadata; forked histories may append a parent row later.
-    return metas[0]
+# Shared with curate-sessions so inherited metadata has one interpretation.
+from kb_session_identity import filename_session_id as _filename_session_id
+from kb_session_identity import select_session_meta as _select_session_meta
 
 
 def _is_subagent_meta(meta: dict[str, Any]) -> bool:
@@ -532,6 +508,36 @@ def _default_dates(days: int) -> list[str]:
     return [f"{today - timedelta(days=i):%Y-%m-%d}" for i in range(max(1, days))]
 
 
+def _process_retrieval_evidence(rows: list[dict], session_id: str, delivered: set[str]) -> list[dict]:
+    """Process completion and model-visible delivery are independent evidence."""
+    found = {}
+    for row in rows:
+        payload = row.get("payload") or {}
+        if row.get("type") != "event_msg" or payload.get("type") != "item_completed":
+            continue
+        if payload.get("thread_id") and payload["thread_id"] != session_id:
+            continue
+        item = payload.get("item") or {}
+        if item.get("type") != "CommandExecution":
+            continue
+        command = item.get("command") or []
+        if isinstance(command, list):
+            command = command[-1] if len(command) >= 3 and command[-2] in {"-c", "-lc"} else shlex.join(command)
+        scripts = [s for segment in command_contract.split_shell_commands(str(command)) for s in _detected_scripts(segment)]
+        if "kb_rag_context" not in scripts:
+            continue
+        for result in session_output.retrieval_results(str(item.get("stdout") or "")):
+            retrieval_id = result.get("retrieval_id")
+            if not retrieval_id:
+                continue
+            found[retrieval_id] = {"retrieval_id": retrieval_id, "process_id": item.get("process_id"),
+                "command_event_id": item.get("id"), "turn_id": payload.get("turn_id"),
+                "process_status": item.get("status"), "exit_code": item.get("exit_code"),
+                "hit_count": result.get("hit_count"), "query": result.get("query", ""),
+                "delivered_to_model": retrieval_id in delivered}
+    return list(found.values())
+
+
 def _parse_session(path: Path) -> dict[str, Any]:
     user_msgs: list[str] = []
     rows: list[dict[str, Any]] = []
@@ -598,6 +604,8 @@ def _parse_session(path: Path) -> dict[str, Any]:
                 unparsed_exec_count += 1
 
     detected_kb_call_count = 0
+    rag_request_count = 0
+    closeout_request_count = 0
     rag_events: list[dict[str, Any]] = []
     closeout_events: list[dict[str, Any]] = []
     for call_info in call_rows:
@@ -608,6 +616,7 @@ def _parse_session(path: Path) -> dict[str, Any]:
         success = _execution_success(output)
         retrieval_results = session_output.retrieval_results(output)
         retrieval_result_index = 0
+        rag_command_count = sum("kb_rag_context" in _detected_scripts(c) for c in commands)
         for cmd in commands:
             tokens = _parse_cli_tokens(cmd)
             if "personal-kb/SKILL.md" in cmd and success is True:
@@ -617,20 +626,34 @@ def _parse_session(path: Path) -> dict[str, Any]:
                 if not _is_help_invocation(tokens, KB_CALL_PATTERNS[key])
             ]
             detected_kb_call_count += len(scripts)
-            if scripts and success is False:
+            rag_request_count += sum(k in {"kb_rag_context", "kb_search"} for k in scripts)
+            closeout_request_count += int("kb_closeout" in scripts)
+            command_success = success
+            selected_result = None
+            if "kb_rag_context" in scripts:
+                query = _normalized_query(_rag_query(tokens, KB_CALL_PATTERNS["kb_rag_context"]))
+                matches = [result for result in retrieval_results
+                           if query and _normalized_query(str(result.get("query") or "")) == query]
+                if len(matches) == 1:
+                    selected_result = matches[0]
+                elif rag_command_count == len(retrieval_results) and not any(r.get("query") for r in retrieval_results):
+                    selected_result = retrieval_results[retrieval_result_index]
+                retrieval_result_index += 1
+                if selected_result is not None:
+                    command_success = selected_result.get("success", True)
+            if scripts and command_success is False:
                 failed_kb_call_count += len(scripts)
-            if scripts and success is None:
+            if scripts and command_success is None:
                 execution_unknown_kb_call_count += len(scripts)
-            if success is not True:
+            if command_success is not True:
                 continue
             for key in scripts:
                 counters[key] += 1
                 if key in {"kb_rag_context", "kb_search"}:
                     result: dict[str, Any] = {}
                     if key == "kb_rag_context":
-                        if retrieval_result_index < len(retrieval_results):
-                            result = retrieval_results[retrieval_result_index]
-                        retrieval_result_index += 1
+                        if selected_result is not None:
+                            result = selected_result
                     rag_events.append({
                         "turn_id": call_info["turn_id"],
                         "sequence": call_info["sequence"],
@@ -655,19 +678,24 @@ def _parse_session(path: Path) -> dict[str, Any]:
                 counters["kb_update_use"] += 1
 
     matched_rag_calls, unmatched_rag_events = _match_rag_closeouts(rag_events, closeout_events)
+    delivered_ids = {r["retrieval_id"] for text in output_by_call_id.values()
+                     for r in session_output.retrieval_results(text) if r.get("retrieval_id")}
+    process_results = _process_retrieval_evidence(rows, str(meta.get("id") or ""), delivered_ids)
     user_text = " ".join(user_msgs)
     source = _source_bucket(meta)
     is_subagent = _is_subagent_meta(meta)
-    is_main = bool(meta) and not is_subagent
+    is_main = bool(meta) and not is_subagent and not meta.get("identity_unresolved")
     parent_scope_text, has_subagent_guard = command_contract.strip_subagent_only_kb_guards(user_text)
     parent_forbid = bool(FORBID_KB_RE.search(parent_scope_text))
     forbid_kb_scope = "global" if parent_forbid else "subagent_only" if has_subagent_guard else "none"
     forbid_kb = parent_forbid or (is_subagent and has_subagent_guard)
     runtime_audit = bool(RUNTIME_AUDIT_RE.search(user_text))
-    explicit_kb = bool(EXPLICIT_KB_RE.search(user_text)) and not runtime_audit
+    intent_text = re.sub(r"(?:你的|模型的?|训练)?知识库(?:截止|更新|更新到|截止到).{0,30}", "", user_text)
+    explicit_kb = bool(EXPLICIT_KB_RE.search(intent_text)) and not runtime_audit
     memory_needed = bool(MEMORY_NEEDED_RE.search(user_text))
     rag_or_search = counters["kb_rag_context"] + counters["kb_search"]
     write_or_update = counters["kb_add"] + counters["kb_update"]
+    session_scope = counters["kb_session_curate"]
 
     parsed = {
         "file": path.name,
@@ -686,6 +714,13 @@ def _parse_session(path: Path) -> dict[str, Any]:
         "explicit_kb": explicit_kb,
         "memory_needed": memory_needed,
         "rag_or_search": rag_or_search,
+        "rag_request_count": rag_request_count,
+        "closeout_request_count": closeout_request_count,
+        "identity_unresolved": bool(meta.get("identity_unresolved")),
+        "process_retrieval_results": process_results,
+        "process_retrieval_result_count": len(process_results),
+        "result_not_delivered_count": sum(not r["delivered_to_model"] for r in process_results),
+        "session_scope": session_scope,
         "rag_closeout_match_count": matched_rag_calls,
         "rag_calls_without_closeout": len(unmatched_rag_events),
         "rag_queries_without_closeout": [
@@ -766,7 +801,7 @@ def _closeout_has_action(row: dict[str, Any]) -> bool:
 def _closeout_has_integrity_gap(row: dict[str, Any]) -> bool:
     linked_missing = (
         _as_int(row.get("rag_calls")) > 0
-        and not bool(_as_list(row.get("linked_retrieval_ids")))
+        and not command_contract.retrieval_linkage_present(row)
     )
     brief_missing = "session_brief_hit" not in row or "session_brief_help" not in row
     return linked_missing or brief_missing
@@ -910,12 +945,12 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
 
     kb_activity = [
         s for s in sessions
-        if s["rag_or_search"] or s["write_or_update"] or s["counters"].get("kb_closeout")
+        if s["rag_or_search"] or s["write_or_update"] or s["session_scope"] or s["counters"].get("kb_closeout")
     ]
     violations = [
         s for s in sessions
         if s["forbid_kb"] and (
-            s["rag_or_search"] or s["write_or_update"] or s["counters"].get("kb_closeout")
+            s["rag_or_search"] or s["write_or_update"] or s["session_scope"] or s["counters"].get("kb_closeout")
         )
     ]
     missed_main = [
@@ -924,6 +959,8 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         and not s.get("terminal_aborted")
         and not s["forbid_kb"]
         and not s["runtime_audit"]
+        and not s["session_scope"]
+        and not s.get("rag_request_count")
         and (s["explicit_kb"] or s["memory_needed"])
         and not s.get("effective_rag_or_search", s["rag_or_search"])
     ]
@@ -939,6 +976,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         and not s.get("terminal_aborted")
         and not s["forbid_kb"]
         and not s["runtime_audit"]
+        and not s["session_scope"]
         and (s["explicit_kb"] or s["memory_needed"])
     ]
     main_expected_and_used_rag = [
@@ -992,7 +1030,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         ),
         "linked_retrieval_id_missing": sum(
             _as_int(r.get("rag_calls")) > 0
-            and not bool(_as_list(r.get("linked_retrieval_ids")))
+            and not command_contract.retrieval_linkage_present(r)
             for r in closeouts
         ),
         "session_brief_telemetry_missing": sum(
@@ -1028,6 +1066,9 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "sessions_by_source": dict(by_source),
         "kb_activity_sessions": len(kb_activity),
         "main_sessions": count(lambda s: s["is_main"]),
+        "identity_unresolved_sessions": count(lambda s: s.get("identity_unresolved")),
+        "process_retrieval_result_count": sum(s.get("process_retrieval_result_count", 0) for s in sessions),
+        "result_not_delivered_count": sum(s.get("result_not_delivered_count", 0) for s in sessions),
         "subagent_sessions": count(lambda s: s["is_subagent"]),
         "terminal_aborted_sessions": count(lambda s: s.get("terminal_aborted")),
         "main_missed_rag_sessions": len(missed_main),

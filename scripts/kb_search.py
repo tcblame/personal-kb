@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import argparse
 import heapq
-import io
 import json
 import os
+import re
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -13,9 +13,9 @@ from typing import Any
 import kb_adoption
 
 # Windows UTF-8 输出修复
-if sys.platform == 'win32' and hasattr(sys.stdout, 'buffer'):
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace', line_buffering=True)
+from kb_lib import configure_utf8_streams
+
+configure_utf8_streams()
 
 from kb_kinds import VALID_KINDS, parse_kind_filter, parse_legacy_type_filter
 from kb_lib import (
@@ -373,6 +373,116 @@ def _matches_tags(entry: dict[str, Any], required_tags: list[str]) -> bool:
     return any(t in present for t in required_tags)
 
 
+_EXPANSION_FILLERS = {
+    "请",
+    "帮我",
+    "帮忙",
+    "看看",
+    "查看",
+    "查找",
+    "查一下",
+    "如何",
+    "怎么",
+    "怎样",
+    "是否",
+    "能否",
+    "需要",
+    "优化",
+    "分析",
+    "历史",
+    "之前",
+    "上次",
+    "这个",
+    "那个",
+    "问题",
+    "记录",
+    "知识库",
+    "personal-kb",
+}
+
+
+def _default_expansion_anchor_terms(query: str) -> list[str]:
+    """Infer conservative anchors for direct ``kb_search --expand`` calls.
+
+    ``kb_rag_context`` already computes task-specific anchors, but callers can
+    invoke this lower-level search API directly.  Without an inferred anchor,
+    a translation such as ``数据库`` -> ``database`` could silently lose the
+    only original topic.  Keep code-like/numeric terms first, then meaningful
+    words, and use the full query as a final guard for all-filler prompts.
+    """
+    normalized = " ".join(str(query or "").split())
+    if not normalized:
+        return []
+
+    terms: list[str] = []
+    for part in re.split(r"[\s,，、;；:：()（）\[\]【】{}<>《》\"'`]+", normalized):
+        value = part.strip().lower()
+        if len(value) < 2 or value in _EXPANSION_FILLERS:
+            continue
+        if value not in terms:
+            terms.append(value)
+
+    def priority(value: str) -> tuple[int, int]:
+        code_like = bool(re.search(r"[/\\_.:-]", value)) or any(ch.isdigit() for ch in value)
+        return (0 if code_like else 1, -len(value))
+
+    terms.sort(key=priority)
+    if terms:
+        return terms[:6]
+    return [normalized.casefold()]
+
+
+def _bounded_query_variants(
+    query: str,
+    *,
+    anchor_terms: list[str] | None = None,
+    max_variants: int = 4,
+) -> list[str]:
+    """Bound expansion and keep at least one concrete anchor in each query.
+
+    The low-level search API is also used outside ``kb_rag_context.py``.  Keep
+    the same precision guard here so a direct ``kb_search --expand`` call does
+    not fan out into an unbounded, anchor-less search.
+    """
+    try:
+        limit = max(1, min(8, int(max_variants)))
+    except (TypeError, ValueError):
+        limit = 4
+    original = " ".join(str(query or "").split())
+    if not original:
+        return []
+    anchors = [str(value).strip().lower() for value in (anchor_terms or []) if str(value).strip()]
+    if not anchors:
+        anchors = _default_expansion_anchor_terms(original)
+    variants: list[str] = []
+
+    def has_anchor(value: str) -> bool:
+        if not anchors:
+            return True
+        lower = value.casefold()
+        return any(anchor.casefold() in lower for anchor in anchors)
+
+    def add(value: str) -> None:
+        normalized = " ".join(str(value or "").split())
+        if not normalized:
+            return
+        if anchors and not has_anchor(normalized):
+            normalized = f"{anchors[0]} {normalized}"
+        if normalized.casefold() not in {item.casefold() for item in variants}:
+            variants.append(normalized)
+
+    add(original)
+    try:
+        generated = expand_query_variants(original)
+    except Exception:
+        generated = []
+    for variant in generated:
+        add(variant)
+        if len(variants) >= limit:
+            break
+    return variants[:limit]
+
+
 def _iter_jsonl(path: Path) -> Any:
     if not path.exists():
         return
@@ -400,6 +510,8 @@ def _search_once(
     should_expand: bool,
     synonyms: dict[str, Any],
     limit: int,
+    expansion_anchor_terms: list[str] | None = None,
+    max_query_variants: int = 4,
 ) -> tuple[list[dict[str, Any]], Any]:
     """对单个 query 执行一次检索，返回 (filtered 结果列表, ctx)。
 
@@ -408,7 +520,11 @@ def _search_once(
     """
     # 智能查询展开：生成多个查询变体
     if should_expand and query:
-        query_variants = expand_query_variants(query)
+        query_variants = _bounded_query_variants(
+            query,
+            anchor_terms=expansion_anchor_terms,
+            max_variants=max_query_variants,
+        )
     else:
         query_variants = [query] if query else []
 
@@ -878,6 +994,11 @@ def _main(argv: list[str]) -> int:
 
     # 判断是否启用查询展开
     should_expand = args.expand or config.get("search", {}).get("expand_queries", False)
+    precision_config = config.get("search", {}).get("precision", {})
+    try:
+        max_query_variants = max(1, min(8, int(precision_config.get("max_query_variants", 4))))
+    except (TypeError, ValueError):
+        max_query_variants = 4
     log_search = args.log_search
 
     synonyms = load_synonyms()
@@ -911,6 +1032,7 @@ def _main(argv: list[str]) -> int:
                     should_expand=should_expand,
                     synonyms=synonyms,
                     limit=limit,
+                    max_query_variants=max_query_variants,
                 )
                 for e in results:
                     eid = e.get("id")
@@ -971,6 +1093,7 @@ def _main(argv: list[str]) -> int:
         should_expand=should_expand,
         synonyms=synonyms,
         limit=limit,
+        max_query_variants=max_query_variants,
     )
 
     # P0: 默认搜索只读。日志也需要显式开启，避免搜索本身产生写入副作用。

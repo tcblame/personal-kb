@@ -16,7 +16,24 @@ python3 <skill-root>/scripts/kb_record_codex_effectiveness.py \
   --current-cutoff YYYY-MM-DD --strict-quality
 python3 <skill-root>/scripts/kb_audit_runtime_value.py --last-days 2
 python3 <skill-root>/scripts/kb_eval.py audit-runtime --last-days 2
+python3 <skill-root>/scripts/kb_stats.py --last-days 30 --json
 ```
+
+`kb_stats.py` is a read-only summary of the configured runtime's `closeout.jsonl`,
+using the same `build_report()` as the runtime auditor. Counts describe recorded
+closeouts, not total searches or completed user tasks. Missing runtime data does
+not prove that no retrieval occurred. Old `kb_search.log` and `kb_add.log` are
+available only with `--legacy-log-dir <path>` and are labeled as all-time,
+unfiltered legacy rows; they never contribute to current runtime statistics.
+
+`kb_audit_runtime_value.py` also consumes optional closeout telemetry from the
+precision-first retriever. The report exposes `stale_top3_rate` (non-fresh
+slots among recorded top-three items), `map_noise_rate` (locator-map slots in
+ordinary non-artifact queries), `rejected_hit_count` and
+`rejection_reason_counts`, `confirmed_adoption_rate`, and
+`missing_closeout_rate` when producers provide explicit expected/missing
+closeout counters. A missing telemetry field is reported as unavailable; the
+auditor must not infer a zero from an old closeout.
 
 `kb_eval_preflight.py` is a deterministic policy simulator. Its routing accuracy and
 temporary-copy retrieval checks are not live Codex adoption, closeout completion,
@@ -39,6 +56,20 @@ Metric semantics:
 - Locate without heat is correct, not an error.
 - Decide/fix/write without required heat is an error.
 - Hits rejected with a non-empty reason are measured as rejection, not malformed closeout.
+- A rejected hit is counted once per entry ID; a rejection reason supplied
+  without a separate rejected-ID field still contributes that entry to the
+  rejection count. Reasons are descriptive feedback, not proof that the
+  alternative hit was correct.
+- Top-three quality is measured only when `retrieval_items` (or an explicit
+  aggregate counter) is present. Legacy closeouts without that telemetry are
+  excluded from the top-three denominator rather than treated as fresh or
+  stale.
+- `confirmed_adoption_rate` is the closeout-confirmed adoption rate and is
+  intentionally separate from self-reported `used_entry_ids`.
+- `missing_closeout_rate` is computed only from explicit
+  `missing_closeout_count`/`missing_closeout` and
+  `expected_closeout_count`; it is `null` when no producer supplied a
+  denominator.
 - Count real script execution, not text mentions or source-file reads.
 - Treat `kb.py retrieve/search/remember/update/closeout` as their focused command equivalents.
 - Do not count `kb_*.py --help` as retrieval, maintenance, or closeout usage.

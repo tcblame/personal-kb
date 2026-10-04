@@ -1,6 +1,6 @@
 ---
 name: personal-kb
-description: Retrieve and maintain verified local personal knowledge when a task depends on prior project history, recurring issues, user corrections, terminology, repo/branch/path mappings, reusable decisions, similar past work, or cross-session continuity. Also use for explicit Personal KB audit or maintenance. Do not use for one-off questions fully answerable from current files, generic code edits, current-state diagnostics with sufficient logs, or unrelated Skill/MCP maintenance.
+description: Proactively retrieve and maintain verified local personal knowledge. Invoke when there is any reasonable possibility (roughly 30% is enough) that prior cross-session history, recurring issues, user corrections, terminology, repo/branch/path mappings, reusable decisions, or similar work could materially help; also invoke when current work may have produced a durable memory candidate, even if no retrieval occurred. Do not wait for an explicit KB request. Skip only clearly one-off tasks with no likely historical or future reuse value, and use the read-only audit flow for explicit KB audits.
 ---
 
 # Personal KB
@@ -13,7 +13,7 @@ There is one physical KB root. `repo`, `branch`, and `kind` are logical facets i
 
 ## Decide whether to retrieve
 
-Retrieve only when the answer depends on at least one of these:
+Use a recall-biased semantic judgment: retrieve when there is a reasonable possibility (roughly 30% is enough) that prior knowledge could materially help. Do not require explicit history keywords or proof of dependence. Useful signals include:
 
 - A decision, correction, project state, or unfinished direction from another session.
 - A recurring issue, term, path, repo, branch, service, or business-name mapping.
@@ -62,13 +62,15 @@ For each topic:
 3. Reuse selected hints only within that topic. A retrieval for one topic never consumes or satisfies another topic's budget, even when both topics appeared in the same user message.
 4. Within the same topic, retrieve again only when the user introduces a new durable anchor, asks for broader history after a zero-hit query, current evidence contradicts the prior result, or context was lost and no selected result remains. A later independent topic starts its own budget and is not a retry.
 
+Read [runtime calls](references/runtime-calls.md) for asynchronous tool completion, unresolved attempts, and version checks. An empty first tool output is not evidence that retrieval never ran.
+
 Pass `--session-id` and `--topic-id` on retrieve and closeout when the caller has them. `topic_id` is the independent budget key; it does not prove that a hit was useful. A topic with sufficient current evidence may skip retrieval and close out with a concrete `--reason`/`skipped_reason` only when the task otherwise has no adopted or written entry.
 
 Do not combine unrelated topic anchors into one query. After all topics are integrated, run one parent closeout for the whole request and link every retrieval ID that was actually used. A request that fully skipped KB needs no closeout.
 
 ## Core lifecycle
 
-1. Retrieve a small context set only when historical knowledge is needed.
+1. Retrieve a small context set when historical knowledge could reasonably help.
 2. Verify useful hits against current evidence.
 3. Apply the verified current evidence, not the KB text itself.
 4. When this task used retrieval or KB maintenance, classify actual adoption once and close out; otherwise stop without a KB lifecycle event.

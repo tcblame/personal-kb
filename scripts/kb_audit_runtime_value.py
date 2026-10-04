@@ -2,19 +2,31 @@
 from __future__ import annotations
 
 import argparse
-import io
 import json
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-if sys.platform == "win32" and hasattr(sys.stdout, "buffer"):
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace", line_buffering=True)
+from kb_lib import configure_utf8_streams
+
+configure_utf8_streams()
 
 from kb_lib import kb_base_dir, read_jsonl, runtime_file
 from kb_runtime import is_test_event
+from kb_command_contract import retrieval_linkage_present
+
+
+FRESH_TOP3_STATES = {"fresh", "runtime_recent"}
+ARTIFACT_QUERY_MARKERS = (
+    "简历",
+    "面试材料",
+    "项目经历",
+    "工作经历",
+    "资料",
+    "材料",
+    "artifact_locator",
+)
 
 
 def default_closeout_path(base_dir: Path | None = None) -> Path:
@@ -82,6 +94,81 @@ def _row_sample(rows: list[dict[str, Any]], predicate, limit: int = 6) -> list[s
         if len(samples) >= limit:
             break
     return samples
+
+
+def _retrieval_items(row: dict[str, Any]) -> list[dict[str, Any]]:
+    """Read optional top-level retrieval telemetry without requiring it."""
+    candidates: list[Any] = [
+        row.get("retrieval_items"),
+        row.get("top3_items"),
+        row.get("retrieval_snapshot"),
+        row.get("items"),
+    ]
+    extra = row.get("extra")
+    if isinstance(extra, dict):
+        candidates.extend(
+            [extra.get("retrieval_items"), extra.get("top3_items"), extra.get("retrieval_snapshot")]
+        )
+    for value in candidates:
+        if isinstance(value, dict):
+            value = value.get("items")
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _is_artifact_query(value: Any) -> bool:
+    text = str(value or "").casefold()
+    return any(marker.casefold() in text for marker in ARTIFACT_QUERY_MARKERS)
+
+
+def _rejection_feedback(row: dict[str, Any]) -> tuple[list[str], dict[str, int]]:
+    rejected: list[str] = []
+    for value in _as_list(row.get("rejected_hit_ids")):
+        entry_id = str(value).strip()
+        if entry_id and entry_id not in rejected:
+            rejected.append(entry_id)
+    raw_reasons = row.get("rejection_reasons")
+    reasons: dict[str, int] = {}
+    reason_entry_ids: set[str] = set()
+    if isinstance(raw_reasons, dict):
+        for entry_id, reason in raw_reasons.items():
+            normalized_entry_id = str(entry_id).strip()
+            key = str(reason or "unknown").strip() or "unknown"
+            reasons[key] = reasons.get(key, 0) + 1
+            if normalized_entry_id:
+                reason_entry_ids.add(normalized_entry_id)
+                if normalized_entry_id not in rejected:
+                    rejected.append(normalized_entry_id)
+    for entry_id in rejected:
+        if entry_id in reason_entry_ids:
+            continue
+        reasons["unknown"] = reasons.get("unknown", 0) + 1
+    return rejected, reasons
+
+
+def _top3_quality(row: dict[str, Any]) -> tuple[int, int, int, int, bool]:
+    """Return stale/map counters and whether top-3 telemetry was present."""
+    items = _retrieval_items(row)
+    if not items:
+        # Allow producers that already aggregate the counters in closeout.
+        top3 = _as_int(row.get("top3_count"))
+        stale = _as_int(row.get("stale_top3_count"))
+        map_slots = _as_int(row.get("map_top3_count"))
+        map_noise = _as_int(row.get("map_noise_count"))
+        present = top3 > 0 or any(key in row for key in ("stale_top3_count", "map_noise_count"))
+        return stale, top3, map_noise, map_slots, present
+    top3_items = items[:3]
+    stale = sum(
+        str(item.get("freshness_state") or "legacy_unverified") not in FRESH_TOP3_STATES
+        for item in top3_items
+    )
+    query = row.get("queries")
+    query_text = " ".join(str(value) for value in query) if isinstance(query, list) else str(query or "")
+    ordinary = not _is_artifact_query(query_text)
+    map_slots = sum(str(item.get("kind") or "") == "map" for item in top3_items)
+    map_noise = sum(ordinary and str(item.get("kind") or "") == "map" for item in top3_items)
+    return stale, len(top3_items), map_noise, map_slots, True
 
 
 def build_report(
@@ -153,13 +240,13 @@ def build_report(
     session_brief_telemetry_missing = closeout_total - session_brief_telemetry_present
     linked_retrieval_id_missing = sum(
         _as_int(row.get("rag_calls")) > 0
-        and not bool(_as_list(row.get("linked_retrieval_ids")))
+        and not retrieval_linkage_present(row)
         for row in recent_rows
     )
     closeout_integrity_missing = sum(
         (
             _as_int(row.get("rag_calls")) > 0
-            and not bool(_as_list(row.get("linked_retrieval_ids")))
+            and not retrieval_linkage_present(row)
         )
         or ("session_brief_hit" not in row or "session_brief_help" not in row)
         for row in recent_rows
@@ -177,6 +264,42 @@ def build_report(
         closeout_total,
     )
 
+    stale_top3_count = 0
+    top3_slot_count = 0
+    map_noise_count = 0
+    map_top3_slot_count = 0
+    top3_quality_rows = 0
+    rejection_reason_counts: dict[str, int] = {}
+    rejected_hit_count = 0
+    explicit_missing_closeout_count = 0
+    explicit_expected_closeout_count = 0
+    for row in recent_rows:
+        stale, top3, map_noise, map_slots, present = _top3_quality(row)
+        if present:
+            top3_quality_rows += 1
+            stale_top3_count += stale
+            top3_slot_count += top3
+            map_noise_count += map_noise
+            map_top3_slot_count += map_slots
+        rejected, row_reasons = _rejection_feedback(row)
+        rejected_hit_count += len(rejected)
+        for reason, count in row_reasons.items():
+            rejection_reason_counts[reason] = rejection_reason_counts.get(reason, 0) + count
+        # These optional counters are emitted by session/runtime bridges when
+        # they can observe a retrieval without a matching closeout.  Do not
+        # infer a false zero from old closeout rows that predate the bridge.
+        explicit_missing_closeout_count += _as_int(row.get("missing_closeout_count"))
+        explicit_missing_closeout_count += int(_as_bool(row.get("missing_closeout")))
+        explicit_expected_closeout_count += _as_int(row.get("expected_closeout_count"))
+
+    stale_top3_rate = _rate_or_none(stale_top3_count, top3_slot_count)
+    map_noise_rate = _rate_or_none(map_noise_count, top3_slot_count)
+    missing_closeout_rate = _rate_or_none(
+        explicit_missing_closeout_count,
+        explicit_expected_closeout_count,
+    )
+    confirmed_adoption_rate = confirmed_use_rate
+
     summary = (
         f"{last_days}d closeouts={closeout_total}, hits={hit_closeouts}, "
         f"used_hits={used_hit_closeouts}, confirmed_adoptions={adopted_hit_closeouts}, "
@@ -186,7 +309,11 @@ def build_report(
         f"closeout_integrity_missing={closeout_integrity_missing}, "
         f"excluded_test_rows={excluded_test_rows}, "
         f"session_brief_help_rate={'n/a' if session_brief_help_rate is None else session_brief_help_rate}, "
-        f"session_brief_telemetry_missing={session_brief_telemetry_missing}"
+        f"session_brief_telemetry_missing={session_brief_telemetry_missing}, "
+        f"stale_top3_rate={'n/a' if stale_top3_rate is None else stale_top3_rate}, "
+        f"map_noise_rate={'n/a' if map_noise_rate is None else map_noise_rate}, "
+        f"confirmed_adoption_rate={confirmed_adoption_rate}, "
+        f"missing_closeout_rate={'n/a' if missing_closeout_rate is None else missing_closeout_rate}"
     )
 
     return {
@@ -202,6 +329,7 @@ def build_report(
         "adopted_hit_closeouts": adopted_hit_closeouts,
         "confirmed_use_rate": confirmed_use_rate,
         "adoption_confirmation_rate": adoption_confirmation_rate,
+        "confirmed_adoption_rate": confirmed_adoption_rate,
         "use_rate": confirmed_use_rate,
         "unconfirmed_used_closeouts": unconfirmed_used_closeouts,
         "unconfirmed_used_hit_closeouts": unconfirmed_used_hit_closeouts,
@@ -219,6 +347,18 @@ def build_report(
         "linked_retrieval_id_missing": linked_retrieval_id_missing,
         "closeout_integrity_missing": closeout_integrity_missing,
         "closeout_integrity_missing_rate": closeout_integrity_missing_rate,
+        "stale_top3_count": stale_top3_count,
+        "top3_slot_count": top3_slot_count,
+        "stale_top3_rate": stale_top3_rate,
+        "map_noise_count": map_noise_count,
+        "map_top3_slot_count": map_top3_slot_count,
+        "map_noise_rate": map_noise_rate,
+        "top3_quality_rows": top3_quality_rows,
+        "rejected_hit_count": rejected_hit_count,
+        "rejection_reason_counts": rejection_reason_counts,
+        "explicit_missing_closeout_count": explicit_missing_closeout_count,
+        "explicit_expected_closeout_count": explicit_expected_closeout_count,
+        "missing_closeout_rate": missing_closeout_rate,
         "unconfirmed_used_sample": _row_sample(
             recent_rows,
             lambda row: bool(_as_list(row.get("used_entry_ids")))
@@ -237,6 +377,17 @@ def build_report(
 
 def _print_text(report: dict[str, Any]) -> None:
     print(f"KB_RUNTIME_VALUE {report['summary']}")
+    print(
+        "- retrieval_quality: "
+        f"stale_top3_rate={report.get('stale_top3_rate')} "
+        f"map_noise_rate={report.get('map_noise_rate')} "
+        f"rejected_hits={report.get('rejected_hit_count', 0)}"
+    )
+    print(
+        "- lifecycle: "
+        f"confirmed_adoption_rate={report.get('confirmed_adoption_rate')} "
+        f"missing_closeout_rate={report.get('missing_closeout_rate')}"
+    )
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
 

@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
-import io
 import json
 import os
 import subprocess
@@ -18,9 +17,9 @@ import kb_evidence
 import kb_record_validation
 
 # Windows UTF-8 输出修复
-if sys.platform == 'win32' and hasattr(sys.stdout, 'buffer'):
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace', line_buffering=True)
+from kb_lib import configure_utf8_streams
+
+configure_utf8_streams()
 
 from kb_lib import (
     JsonlSafetyError,
@@ -597,6 +596,7 @@ def _main(argv: list[str]) -> int:
                     [sys.executable, str(schema_script), "check", "--kind", entry_kind, "--entry-json", json.dumps(entry), "--json"],
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
                     timeout=5,
                 )
                 if check_result.returncode == 0 and check_result.stdout.strip():

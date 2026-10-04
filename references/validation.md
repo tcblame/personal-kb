@@ -12,7 +12,11 @@ Core commands:
 
 ```bash
 python3 -m py_compile <skill-root>/scripts/*.py
+python3 <skill-root>/scripts/kb_session_review_test.py
 python3 <skill-root>/scripts/kb_rag_context_test.py
+python3 <skill-root>/scripts/kb_retrieval_reliability_test.py
+python3 <skill-root>/scripts/kb_stats_test.py
+python3 <skill-root>/scripts/kb_audit_runtime_value_test.py
 python3 <skill-root>/scripts/kb_audit_codex_sessions_test.py
 python3 <skill-root>/scripts/kb_record_codex_effectiveness_test.py
 python3 <skill-root>/scripts/kb_storage_test.py
@@ -44,14 +48,27 @@ Required regression assertions:
 - New classified adoption flags are parsed and reported.
 - Retrieval/closeout pairing is per turn or query, not merely per long session.
 - Artifact locators do not fill unrelated diagnostics; session briefs do not match on generic tags alone.
+- Shared evidence paths do not collapse distinct conclusions; different kinds and scopes stay separate, while near-identical same-kind/scope titles still deduplicate.
+- Statistics use configured runtime closeouts, preserve test exclusion and sample denominators, and keep legacy logs separate without writing during reads.
 - User-confirmed requirements remain retrievable and current evidence remains authoritative.
 - Explicit repo override and safe workspace fallback are silent.
 - Successful closeout is silent; locate does not heat; decide/fix/write do; brief IDs never heat.
+- RAG parameter errors expose structured `invalid_request`/`retryable:false` output; an explicitly
+  requested `--best-effort` runtime failure becomes `unavailable` without a non-zero exit, while
+  corruption and invalid requests remain actionable failures.
+- Receipt targets cannot replace KB/config/other existing files or follow symlinks; successful
+  retrieval survives receipt errors with the same result and ID, and one invocation never
+  reruns retrieval to recover a receipt failure.
+- Internal KeyError/RuntimeError/TypeError failures are not softened by best-effort.
+- Complementary legacy evidence remains a warning-level lead beside unrelated fresh hits;
+  reliable equivalents supersede legacy duplicates within the same scope.
+- Blocked, non-current, duplicate, or filtered raw hits do not satisfy the expansion stop
+  condition, and evidence checks are reused within the invocation.
 - Parameter, corruption, lock, unsafe-routing, and write failures remain actionable and non-zero.
 - Ordinary subagents do not invoke KB.
 - A multi-topic request is split before retrieval; each history-dependent topic has an independent initial RAG budget, while the parent still closes out once.
 - `更新 ccs` resolves the durable `ccs = cc-switch` mapping and recalls the verified safe update entry instead of searching for a `ccs` executable.
-- Safety-critical `ccs` mappings and update/restart commands remain in a mandatory project instruction section, outside optional KB policy, and the project prompt requires verified parent hints before dispatching a history-dependent worker.
+- Simulator regressions verify history routing, current-evidence overrides, and parent/worker ownership without requiring a particular host path or enclosing project AGENTS.md. Project-specific operation instructions are reviewed at the integration point.
 - Broad parent retrieval routes to one read-only KB scout; the scout cannot write, heat, or close out; the parent reuses the returned brief without a duplicate RAG.
 - Every RAG output has an opaque `retrieval_id`; delegated IDs link only to the declared parent closeout and orphan/duplicate IDs remain visible.
 - Chained wrapper retrievals are split into distinct calls and ordered multi-result or named nested exec outputs preserve every real retrieval ID.
@@ -66,3 +83,5 @@ Required regression assertions:
 - Session audit, effectiveness materialization, and preflight reports redact credential-shaped values before output or storage.
 - Opaque provider tokens remain redacted when immediately followed by Chinese or other non-ASCII word characters.
 - The required ordinary-subagent no-KB guard does not mark the parent session as forbidden from explicit KB maintenance or retrieval.
+
+Session-review regressions additionally distinguish asynchronous request, shell completion, typed result delivery, and adoption. Bare outer exec completion remains unknown; escaped headers, nested multi-results, and spoofed note tokens preserve canonical receipt identity. Range review includes dated continuations and labels missing identity/time rather than inheriting a parent.

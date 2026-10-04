@@ -82,14 +82,21 @@ def _header_results(text: str) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     for line in text.splitlines():
         stripped = line.strip()
+        if stripped.startswith("KB_RAG_CONTEXT ") and "\\n" in stripped:
+            stripped = stripped.replace("\\n", "\n").splitlines()[0]
+        if stripped.startswith("KB_RAG_CONTEXT "):
+            stripped = stripped.replace(r'\"', '"')
         if not stripped.startswith("KB_RAG_CONTEXT "):
             continue
+        query_match = re.search(r'query="(.*?)"\s+retrieval_id=', stripped)
         ids = RAG_TEXT_RETRIEVAL_ID_RE.findall(stripped)
         hits = RAG_TEXT_HITS_RE.findall(stripped)
         retrieval_id = ids[-1] if ids and RETRIEVAL_ID_RE.fullmatch(ids[-1]) else ""
         results.append({
             "retrieval_id": retrieval_id,
             "hit_count": int(hits[-1]) if hits else None,
+            "success": True,
+            "query": query_match[1] if query_match else "",
         })
     return results
 
@@ -110,15 +117,23 @@ def _json_results(text: str) -> list[dict[str, Any]]:
                 hit_count = None
         elif isinstance(payload.get("items"), list):
             hit_count = len(payload["items"])
-        results.append({"retrieval_id": retrieval_id, "hit_count": hit_count})
+        results.append({"retrieval_id": retrieval_id, "hit_count": hit_count,
+                        "query": str(payload.get("query") or ""),
+                        "success": "error" not in payload and payload.get("status") not in {"error", "unavailable"}})
     return results
 
 
 def retrieval_results(output: str) -> list[dict[str, Any]]:
-    """Return the most complete ordered RAG-result group from an exec envelope."""
+    """Return unique ordered results, preferring authoritative headers over note JSON."""
     best: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
     for text in nested_output_texts(output):
-        for candidates in (_header_results(text), _json_results(text)):
-            if len(candidates) > len(best):
-                best = candidates
+        for candidates in (_header_results(text) or _json_results(text),):
+            for candidate in candidates:
+                identity = candidate.get("retrieval_id")
+                if identity and identity in seen_ids:
+                    continue
+                if identity:
+                    seen_ids.add(identity)
+                best.append(candidate)
     return best

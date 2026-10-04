@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import io
 import json
 import os
 import re
@@ -13,9 +12,9 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-if sys.platform == "win32" and hasattr(sys.stdout, "buffer"):
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace", line_buffering=True)
+from kb_lib import configure_utf8_streams
+
+configure_utf8_streams()
 
 from kb_lib import (
     append_jsonl,
