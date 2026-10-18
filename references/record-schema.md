@@ -4,6 +4,12 @@ Read this file only for add, update, supersede, import, or evidence-refresh work
 
 Use one of six kinds: `map`, `issue`, `pitfall`, `experience`, `requirement`, or `implementation`.
 
+Optional `domain` metadata adds stable entity/project identity, scope, and evidenced
+relationships without changing these kinds. Read [domain-model.md](domain-model.md)
+before adding it. Register referenced entities first; update existing identities
+with `--expected-rev`. Partial replacements use scoped `supersedes` relationships,
+not a global superseded status. Legacy records do not require migration.
+
 Every durable record needs:
 
 - A short stable title and concise reusable conclusion.

@@ -81,6 +81,7 @@ PUBLIC_TESTS = {
     "kb_challenge_test.py",
     "kb_retain_file_test.py",
     "kb_release_test.py",
+    "kb_domain_test.py",
 }
 
 

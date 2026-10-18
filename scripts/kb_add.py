@@ -39,6 +39,7 @@ from kb_lib import (
     validate_entry_fields,
     write_index,
     kb_base_dir,
+    runtime_file,
 )
 
 # 尝试导入倒排索引模块（可选依赖）
@@ -620,7 +621,12 @@ def _main(argv: list[str]) -> int:
 
     # 固定 bucket 锁覆盖“查重/判断/更新或追加”的完整事务。
     with bucket_lock(ctx.kb_path):
-        related_entries = search_related_entries(ctx.kb_path, entry)
+        # Domain entities have explicit identity and scoped replacement edges.
+        # Text similarity must not merge different entities or globally retire
+        # an old requirement when only one branch/environment is replaced.
+        related_entries = [] if "domain" in entry else [
+            row for row in search_related_entries(ctx.kb_path, entry) if "domain" not in row
+        ]
 
         if related_entries and args.update_mode != "milestone":
             old_entry = related_entries[0]
@@ -706,9 +712,8 @@ def _main(argv: list[str]) -> int:
             pass
 
     # 写入日志记录
-    log_dir = Path.home() / ".codex" / "personal-kb-logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = log_dir / "kb_add.log"
+    log_file = runtime_file("writes.jsonl")
+    log_file.parent.mkdir(parents=True, exist_ok=True)
     log_entry = {
         "ts": datetime.now().isoformat(),
         "kind": entry_kind,
@@ -731,7 +736,10 @@ def _main(argv: list[str]) -> int:
 
 def main(argv: list[str]) -> int:
     try:
-        return _main(argv)
+        # Serialize cross-bucket identity/reference checks with other writers.
+        # bucket_lock itself uses a machine-local lock, outside durable data.
+        with bucket_lock(kb_base_dir() / ".domain-write"):
+            return _main(argv)
     except JsonlSafetyError as exc:
         sys.stderr.write(f"error: {exc}\n")
         return 5

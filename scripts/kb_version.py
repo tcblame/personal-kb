@@ -24,14 +24,17 @@ def build_identity() -> dict:
             portable.update(str(path.relative_to(root)).encode())
             portable.update(_public_replacements(source).encode())
     skill = root / 'SKILL.md'
+    domain_model = root / 'references' / 'domain-model.json'
     return {'schema': 'personal-kb.build/v1', 'code_sha256': digest.hexdigest(),
             'portable_code_sha256': portable.hexdigest(),
             'entrypoint': str(root / 'scripts' / 'kb.py'),
             'skill_sha256': hashlib.sha256(skill.read_bytes()).hexdigest() if skill.exists() else None,
+            'domain_model_sha256': hashlib.sha256(domain_model.read_bytes()).hexdigest() if domain_model.exists() else None,
             'config_path': str(Path(os.environ.get('PERSONAL_KB_CONFIG') or root / 'config.json')),
             'data_root': str(storage_layout().root),
             'capabilities': ['session-topic-identity', 'scope-anchor', 'exclusive-receipt',
-                             'unresolved-attempt-closeout', 'own-rollout-identity']}
+                             'unresolved-attempt-closeout', 'own-rollout-identity',
+                             'domain-model-v1', 'project-graph-retrieval', 'scoped-supersession']}
 
 
 def main(argv: list[str]) -> int:

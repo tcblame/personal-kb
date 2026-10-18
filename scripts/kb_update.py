@@ -322,6 +322,14 @@ def _main(argv: list[str]) -> int:
                 )
                 return 2
 
+            original_domain = original_entry.get("domain")
+            if isinstance(original_domain, dict) and (not isinstance(entry.get("domain"), dict) or any(
+                entry["domain"].get(key) != original_domain.get(key)
+                for key in ("entity_id", "entity_type", "project_id", "repo_id")
+            )):
+                sys.stderr.write("Domain identity is immutable; create an explicit migration instead\n")
+                return 3
+
             valid, error_msg = validate_entry_fields(entry)
             if not valid:
                 sys.stderr.write(f"Entry validation failed: {error_msg}\n")
@@ -438,7 +446,8 @@ def _main(argv: list[str]) -> int:
 
 def main(argv: list[str]) -> int:
     try:
-        return _main(argv)
+        with bucket_lock(kb_base_dir() / ".domain-write"):
+            return _main(argv)
     except JsonlSafetyError as exc:
         sys.stderr.write(f"error: {exc}\n")
         return 5

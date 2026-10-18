@@ -25,6 +25,8 @@ import kb_search
 import kb_session_brief
 from kb_runtime import runtime_scope
 import kb_evidence
+import kb_domain
+import kb_project_view
 from kb_kinds import VALID_KINDS, parse_kind_filter, parse_legacy_type_filter
 from kb_lib import (
     JsonlSafetyError,
@@ -1242,6 +1244,10 @@ def _title_similarity(left: str, right: str) -> float:
 
 
 def _similar_result(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    left_entity = left.get("domain", {}).get("entity_id")
+    right_entity = right.get("domain", {}).get("entity_id")
+    if left_entity or right_entity:
+        return bool(left_entity and left_entity == right_entity)
     same_scope = (
         str(left.get("repo") or "").casefold(),
         str(left.get("branch") or "").casefold(),
@@ -1494,6 +1500,14 @@ def _compact_entry(
     if is_cross_project:
         item["cross_project"] = True
         item["from_project"] = formatted_entry.get("_from_project") or raw_entry.get("repo", "")
+    if raw_entry.get("domain"):
+        item["domain"] = kb_project_view.compact_domain(raw_entry)
+        item["evidence_refs"] = (raw_entry.get("evidence_refs") or [])[:3]
+    if formatted_entry.get("_same_project"):
+        item["same_project"] = True
+    if formatted_entry.get("_domain_history"):
+        item["applicability_state"] = "historical_or_out_of_scope"
+        _append_warning(item, "historical, candidate, or out-of-scope domain record; do not apply as a current requirement")
     return item
 
 
@@ -1520,6 +1534,8 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("--min-confidence must be between 0 and 1")
     if args.max_total_chars < 0:
         raise ValueError("--max-total-chars must be >= 0")
+    if getattr(args, "no_domain", False) and (getattr(args, "project_id", "") or getattr(args, "project_view", False)):
+        raise ValueError("--no-domain cannot be combined with --project-id or --project-view")
     retrieval_id = _retrieval_id(getattr(args, "retrieval_id", ""))
     scope_anchors = [str(value).strip() for value in (getattr(args, "scope_anchor", []) or []) if str(value).strip()]
     _validate_scope_anchors(args.query, scope_anchors)
@@ -1589,6 +1605,7 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
     original_terms = _query_planning_terms(args.query)
     required_tags = kb_search._parse_tags(args.tags)
     reference_repo = None
+    reference_branch = args.branch
     candidates: dict[str, dict[str, Any]] = {}
     rejected_count = 0
     rejected_nonactionable_count = 0
@@ -1668,6 +1685,7 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
             )
         if reference_repo is None and not args.global_search and ctx is not None:
             reference_repo = ctx.repo_name
+            reference_branch = args.branch or ctx.branch
         search_batches.append(
             {
                 "plan_index": plan_index,
@@ -1681,6 +1699,40 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
 
     evidence_cache: dict[str, dict[str, Any]] = {}
 
+    def verify_once(entry: dict) -> dict:
+        key = str(entry.get("id") or "")
+        if key not in evidence_cache:
+            evidence_cache[key] = _safe_evidence_verification(entry)
+        return evidence_cache[key]
+
+    project_context = None
+    if not getattr(args, "no_domain", False):
+        project_context = kb_project_view.ProjectContext(
+            args.query, repo=reference_repo or args.repo, branch=reference_branch,
+            environment=getattr(args, "environment", ""),
+            project_id=getattr(args, "project_id", ""), verify=verify_once,
+        )
+
+    def format_entry(raw: dict) -> dict:
+        if project_context and project_context.same_project(raw):
+            return {**raw, "_same_project": True}
+        if (project_context and args.include_noncurrent and raw.get("domain")
+                and raw["domain"]["project_id"] == project_context.project_id
+                and project_context.eligible(raw, include_noncurrent=True)):
+            return {**raw, "_same_project": True, "_domain_history": True}
+        return kb_search._format_cross_project_entry(
+            raw, "__global_search__" if args.global_search else reference_repo,
+        )
+
+    def annotate_domain(item: dict, raw: dict) -> None:
+        if project_context and raw.get("domain"):
+            entity_id = raw["domain"]["entity_id"]
+            if entity_id in project_context.replaced:
+                item["superseded_in_scope_by"] = project_context.replaced[entity_id]
+            if entity_id in project_context.uncertain_replacements:
+                item["applicability_state"] = "needs_review"
+                _append_warning(item, "A scoped replacement needs fresh evidence; do not assume this older requirement is current")
+
     def collect_batch(batch: dict[str, Any]) -> None:
         nonlocal rejected_count, rejected_nonactionable_count
         plan_index = int(batch["plan_index"])
@@ -1690,6 +1742,9 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
         variant_index = int(batch.get("variant_index") or 0)
         raw_results = batch["raw_results"]
         for raw_rank, raw in enumerate(raw_results):
+            if project_context and not project_context.eligible(raw, include_noncurrent=args.include_noncurrent):
+                rejected_count += 1
+                continue
             if not args.include_noncurrent and _is_noncurrent(raw):
                 continue
             if non_kb_maintenance_query and _is_personal_kb_runtime_entry(raw):
@@ -1744,26 +1799,21 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
                 rejected_count += 1
                 continue
 
-            if args.global_search:
-                formatted = kb_search._format_cross_project_entry(raw, "__global_search__")
-            else:
-                formatted = kb_search._format_cross_project_entry(raw, reference_repo)
+            formatted = format_entry(raw)
 
             merged_terms = _query_terms(f"{args.query} {actual_query}")
             for term in effective_anchor_terms:
                 if term not in merged_terms:
                     merged_terms.append(term)
-            evidence_key = str(raw.get("id") or "")
-            if evidence_key not in evidence_cache:
-                evidence_cache[evidence_key] = _safe_evidence_verification(raw)
             item = _compact_entry(
                 raw,
                 formatted,
                 terms=merged_terms,
                 max_snippet_chars=max(80, args.max_snippet_chars),
                 quality_score=quality_score,
-                evidence=evidence_cache[evidence_key],
+                evidence=verify_once(raw),
             )
+            annotate_domain(item, raw)
             if (
                 item.get("cross_project")
                 and item.get("kind") in {"issue", "pitfall", "experience", "implementation"}
@@ -1928,6 +1978,40 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
                     {"plan": plan.name, "query": variant}
                 )
 
+    if project_context:
+        related = project_context.related(set(candidates), limit=min(32, max(0, search_limit)),
+                                          include_noncurrent=args.include_noncurrent)
+        for raw, path in related:
+            if allowed_kinds and raw.get("kind") not in allowed_kinds:
+                continue
+            if not kb_search._matches_tags(raw, required_tags):
+                continue
+            if recent_cutoff:
+                timestamp = kb_search._ts_key(raw)
+                if not timestamp or datetime.fromtimestamp(timestamp) < recent_cutoff:
+                    continue
+            if prior_decision_query and not _is_decision_candidate(raw):
+                continue
+            if non_kb_maintenance_query and _is_personal_kb_runtime_entry(raw):
+                continue
+            entry_id = raw.get("id")
+            if entry_id in candidates:
+                candidates[entry_id]["related_via"] = path
+                continue
+            item = _compact_entry(
+                raw, format_entry(raw), terms=original_terms,
+                max_snippet_chars=max(80, args.max_snippet_chars),
+                evidence=verify_once(raw),
+            )
+            item["related_via"] = path
+            annotate_domain(item, raw)
+            item["query_groups"] = ["project-graph"]
+            item["why_matched"] = "evidenced project entity / one-hop relation: " + path["type"]
+            item["_score"] = 2.5 + _freshness_rank(item["freshness_state"])
+            # Graph matches have a different basis from lexical confidence.
+            item["retrieval_score"] = item["confidence"] = 0.8
+            candidates[entry_id] = item
+
     items = sorted(candidates.values(), key=lambda item: float(item.get("_score") or 0.0), reverse=True)
     for item in items:
         item.pop("_score", None)
@@ -1972,6 +2056,10 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
         "items": items,
         "runtime": runtime_scope(),
     }
+    if project_context:
+        payload["domain_context"] = project_context.payload()
+        if getattr(args, "project_view", False):
+            payload["project_view"] = kb_project_view.project_view(items, payload["domain_context"])
     if scope_anchors:
         payload["scope_anchors"] = scope_anchors
     if expand_requested:
@@ -2004,6 +2092,8 @@ def _print_markdown(payload: dict[str, Any]) -> None:
     query_groups = payload.get("query_groups") or []
     group_names = [group.get("name") for group in query_groups if isinstance(group, dict) and group.get("name")]
     rejected_weak = payload.get("rejected_weak_count", 0)
+    if payload.get("domain_context", {}).get("state") in {"resolved", "ambiguous"}:
+        sys.stdout.write("KB_PROJECT_CONTEXT " + json.dumps(payload["domain_context"], ensure_ascii=False) + "\n")
     suffix = ""
     if group_names:
         suffix += f" groups={','.join(group_names[:6])}"
@@ -2073,6 +2163,10 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--topic-id", default="", help="Independent topic identifier")
     parser.add_argument("--repo", default="", help="Override repo bucket")
     parser.add_argument("--branch", default="", help="Override branch bucket")
+    parser.add_argument("--project-id", default="", help="Resolve this evidenced domain project ID")
+    parser.add_argument("--environment", default="", help="Domain applicability environment")
+    parser.add_argument("--no-domain", action="store_true", help="Use the legacy lexical path without domain lookup")
+    parser.add_argument("--project-view", action="store_true", help="Include a bounded current project view")
     parser.add_argument(
         "--kind",
         dest="kind_filter",

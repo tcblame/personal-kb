@@ -8,6 +8,8 @@ from pathlib import Path
 DAILY_COMMANDS: dict[str, tuple[str, str, list[str]]] = {
     "version": ("kb_version", "main", []),
     "retrieve": ("kb_rag_context", "main", []),
+    "project": ("kb_rag_context", "main", ["--project-view"]),
+    "project-index": ("kb_domain", "main", []),
     "search": ("kb_search", "main", []),
     "remember": ("kb_add", "main", []),
     "update": ("kb_update", "main", ["update"]),

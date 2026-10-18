@@ -71,6 +71,13 @@ python3 scripts/kb_smoke_test.py . --root-layout
 
 ## 当前限制
 
+项目知识支持可选的轻量领域模型与一跳关系检索，继续使用同一套 JSONL、
+本地 CLI 和证据。`kb.py project` 返回有来源的有限项目视图，
+`kb.py project-index` 显式重建派生索引。关系状态、分支/环境范围及局部需求替代
+由程序检查；已有记录可逐步补充，无需全量迁移。
+详见 [领域模型与项目检索](references/domain-model.md)。这部分提供结构和检索能力，
+尚不代表宿主已能自动捕获每次变化或长期演化效果已经验收。
+
 - `self_reported_use_rate` 是 AI 自报，不是独立人工评测。
 - 历史回放是策略影子，不能证明检索改变了最终答案。
 - 短期 brief 帮助率只有在 closeout 显式写入 `session_brief_hit` / `session_brief_help` 后才有意义；缺字段时只能报告遥测缺失。

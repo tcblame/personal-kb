@@ -85,6 +85,17 @@ python3 <skill-root>/scripts/kb.py retrieve \
 
 Default retrieval is read-only. Do not update search counts, rebuild indexes, refresh aggregations, or include non-current records during ordinary work. Use `kb_search.py` only for full-record inspection, recall debugging, migration, normalization, or explicit corpus audit.
 
+For project knowledge with stable identity or scoped changes, read
+[domain model and project retrieval](references/domain-model.md). Optional
+`domain` metadata and evidenced relationships use the existing records and
+`remember/update`; no separate writable project encyclopedia is created.
+`retrieve` can resolve a project and supplement lexical results with bounded
+one-hop relationships. `project` adds a bounded current view using the same
+retrieval ID. Ambiguous projects, candidate relations, and unknown scopes do
+not become current facts. Register only verified identities and rebuild the
+derived index explicitly with `project-index` after a batch of domain updates.
+Legacy records remain usable without bulk migration.
+
 ## Apply decisions without redoing them
 
 When a hit represents a user-confirmed `requirement` or `decision_confirmed` record:

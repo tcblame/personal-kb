@@ -75,7 +75,10 @@ def strict_record_errors(
     workspace_dir: Path,
     require_fresh_snapshot: bool = True,
 ) -> list[str]:
+    from kb_domain import domain_errors, reference_errors
     return [
+        *domain_errors(entry),
+        *reference_errors(entry),
         *metadata_errors(entry),
         *evidence_errors(
             entry,

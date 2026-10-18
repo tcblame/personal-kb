@@ -12,6 +12,7 @@ Core commands:
 
 ```bash
 python3 -m py_compile <skill-root>/scripts/*.py
+python3 <skill-root>/scripts/kb_domain_test.py
 python3 <skill-root>/scripts/kb_session_review_test.py
 python3 <skill-root>/scripts/kb_rag_context_test.py
 python3 <skill-root>/scripts/kb_retrieval_reliability_test.py

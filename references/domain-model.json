@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "entity_kinds": {
+    "project": ["map"],
+    "repository": ["map"],
+    "component": ["map"],
+    "requirement": ["requirement"],
+    "decision": ["requirement"],
+    "issue": ["issue", "pitfall"],
+    "experience": ["experience", "pitfall"],
+    "implementation": ["implementation"],
+    "evidence": ["map", "implementation"]
+  },
+  "relations": {
+    "belongs_to": {"target_types": ["project", "repository", "component"]},
+    "applies_to": {"target_types": ["project", "repository", "component"]},
+    "supported_by": {"target_types": ["evidence", "implementation"]},
+    "supersedes": {"target_types": ["requirement", "decision", "implementation", "experience", "issue"]},
+    "migrated_from": {"target_types": ["repository", "component"]}
+  },
+  "states": ["confirmed", "candidate", "conflicted"],
+  "scope_fields": ["repo_id", "branch", "environment"],
+  "max_relations_per_record": 32,
+  "max_expansion_candidates": 32
+}

@@ -980,6 +980,10 @@ def validate_entry_fields(entry: dict[str, Any]) -> tuple[bool, str]:
     if project_specific is not None and not isinstance(project_specific, dict):
         return False, f"{entry_kind} 类型的 project_specific 必须是对象"
 
+    from kb_domain import domain_errors
+    errors = domain_errors(entry)
+    if errors:
+        return False, "; ".join(errors)
     return True, ""
 
 
