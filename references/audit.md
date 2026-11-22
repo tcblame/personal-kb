@@ -1,5 +1,7 @@
 # Runtime audit
 
+Codex audit and session curation read ordinary and Zstandard-compressed rollouts, including the sibling archived_sessions directory when the selected root is sessions. They identify equivalent copies by rollout ID. The default audit root honors the runtime's CODEX_SESSIONS_ROOT or CODEX_HOME.
+
 Read this file only for explicit Personal KB quality, effectiveness, or runtime debugging. Runtime audit does not need a long-term RAG query unless record recall itself is under test.
 
 Audit three independent layers:
@@ -9,6 +11,16 @@ Audit three independent layers:
 3. Corpus quality: lifecycle status, duplicates, evidence alignment, freshness, resolvable paths, artifact-locator share, and sensitive content.
 
 Use current session JSONL and runtime logs as evidence. Runtime and derived data are measurements, not durable facts.
+
+For calendar windows, pass `--timezone` explicitly (this machine uses
+`Asia/Shanghai`). The session auditor includes older-started rollouts with
+recent events and filters event timestamps, rather than counting the whole
+history of a continued chat. Missing timestamps remain unknown. It reconciles
+underlying `CommandExecution.aggregated_output` with the exact original command
+and turn; shell completion and delivery back to the model remain separate.
+Short-circuited `version && retrieve` text is not a successful retrieval. Never
+subtract closeout rows or linked IDs from command candidates to claim a
+task-level missing-closeout count.
 
 ```bash
 python3 <skill-root>/scripts/kb_audit_codex_sessions.py --last-days 2
@@ -52,6 +64,12 @@ Identity and pairing rules:
 - Treat explicit Personal KB runtime audits as direct session/runtime inspection, not as missed long-term RAG.
 
 Metric semantics:
+
+- `closeout_total` retains the historical event-row denominator. Separate
+  `unique_closeout_ids`, `duplicate_closeout_rows`, and `missing_closeout_id_rows`
+  make duplicate IDs visible without rewriting history or claiming unique tasks.
+- Explicit `retrieval_items: []` is observed zero-slot telemetry. Missing fields
+  remain unobserved; neither contributes a stale/fresh slot denominator.
 
 - Locate without heat is correct, not an error.
 - Decide/fix/write without required heat is an error.

@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -157,6 +158,14 @@ def _top3_quality(row: dict[str, Any]) -> tuple[int, int, int, int, bool]:
         map_slots = _as_int(row.get("map_top3_count"))
         map_noise = _as_int(row.get("map_noise_count"))
         present = top3 > 0 or any(key in row for key in ("stale_top3_count", "map_noise_count"))
+        for container in (row, row.get("extra")):
+            if isinstance(container, dict):
+                for key in ("retrieval_items", "top3_items", "retrieval_snapshot", "items"):
+                    value = container.get(key)
+                    if isinstance(value, dict):
+                        value = value.get("items")
+                    if isinstance(value, list):
+                        present = True
         return stale, top3, map_noise, map_slots, present
     top3_items = items[:3]
     stale = sum(
@@ -198,6 +207,8 @@ def build_report(
         recent_rows.append(row)
 
     closeout_total = len(recent_rows)
+    closeout_ids = Counter(str(row.get("closeout_id") or "").strip() for row in recent_rows)
+    unidentified_rows = closeout_ids.pop("", 0)
     hit_closeouts = sum(_as_int(row.get("hit_count")) > 0 for row in recent_rows)
     no_hit_closeouts = sum(_as_int(row.get("hit_count")) <= 0 for row in recent_rows)
     used_closeouts = sum(bool(_as_list(row.get("used_entry_ids"))) for row in recent_rows)
@@ -270,6 +281,11 @@ def build_report(
     map_top3_slot_count = 0
     top3_quality_rows = 0
     rejection_reason_counts: dict[str, int] = {}
+    # Count one verified gap per logical closeout even when an audit contains duplicate rows.
+    gap_events = {row["closeout_id"]: row["memory_gap"]["stage"] for row in recent_rows
+                  if row.get("closeout_id") and isinstance(row.get("memory_gap"), dict)
+                  and isinstance(row["memory_gap"].get("stage"), str)}
+
     rejected_hit_count = 0
     explicit_missing_closeout_count = 0
     explicit_expected_closeout_count = 0
@@ -321,6 +337,10 @@ def build_report(
         "last_days": max(1, last_days),
         "since": since.isoformat(timespec="seconds"),
         "closeout_total": closeout_total,
+        "unique_closeout_ids": len(closeout_ids),
+        "duplicate_closeout_rows": sum(count - 1 for count in closeout_ids.values()),
+        "missing_closeout_id_rows": unidentified_rows,
+        "duplicate_closeout_ids_sample": sorted(key for key, count in closeout_ids.items() if count > 1)[:10],
         "hit_closeouts": hit_closeouts,
         "used_closeouts": used_closeouts,
         "used_hit_closeouts": used_hit_closeouts,
@@ -356,6 +376,7 @@ def build_report(
         "top3_quality_rows": top3_quality_rows,
         "rejected_hit_count": rejected_hit_count,
         "rejection_reason_counts": rejection_reason_counts,
+        "memory_gap_counts": dict(Counter(gap_events.values())),
         "explicit_missing_closeout_count": explicit_missing_closeout_count,
         "explicit_expected_closeout_count": explicit_expected_closeout_count,
         "missing_closeout_rate": missing_closeout_rate,

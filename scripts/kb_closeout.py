@@ -21,7 +21,8 @@ import kb_session_brief
 import kb_adoption
 import kb_evidence
 from kb_lib import append_jsonl, find_entry, kb_base_dir, now_iso, read_jsonl, resolve_context, runtime_file
-from kb_runtime import attach_runtime_scope
+from kb_runtime import attach_runtime_scope, runtime_session_id
+from kb_timing import span, timed
 
 
 RETRIEVAL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -31,6 +32,10 @@ MISS_REASONS = {
     "no_verified_hit",
     "execution_failed",
     "unknown",
+}
+MEMORY_REVIEW_STATES = {
+    "not_reusable", "already_recorded", "pending_verification", "blocked_by_instruction",
+    "rejected_evidence", "written", "updated",
 }
 
 
@@ -50,6 +55,8 @@ def _read_json_payload(args: argparse.Namespace) -> dict[str, Any]:
             payload = json.loads(Path(args.json_file).read_text(encoding="utf-8-sig"))
         except (OSError, json.JSONDecodeError) as exc:
             raise ValueError(f"invalid --json-file: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("closeout payload must be a JSON object")
     if args.json:
         try:
             inline = json.loads(args.json)
@@ -58,7 +65,7 @@ def _read_json_payload(args: argparse.Namespace) -> dict[str, Any]:
         if not isinstance(inline, dict):
             raise ValueError("--json must be a JSON object")
         payload.update(inline)
-    if payload and not isinstance(payload, dict):
+    if not isinstance(payload, dict):
         raise ValueError("closeout payload must be a JSON object")
     return payload
 
@@ -395,8 +402,10 @@ def apply_session_brief(
     closeout["session_brief_path"] = str(path)
 
 
+@timed("closeout.build")
 def build_closeout(args: argparse.Namespace) -> dict[str, Any]:
     payload = _read_json_payload(args)
+    telemetry_present = any(key in payload for key in ("retrieval_items", "retrieval_snapshot", "retrieval_snapshots"))
     retrieval_items = _compact_retrieval_items(
         payload.get("retrieval_items", payload.get("retrieval_snapshot"))
     )
@@ -407,7 +416,58 @@ def build_closeout(args: argparse.Namespace) -> dict[str, Any]:
         except json.JSONDecodeError as exc:
             raise ValueError(f"invalid --retrieval-items-json: {exc}") from exc
         retrieval_items = _compact_retrieval_items(inline_items)
+        telemetry_present = True
     linked_retrieval_ids = _linked_retrieval_ids(payload, args)
+    snapshot = payload.get("retrieval_snapshot")
+    snapshots = payload.get("retrieval_snapshots")
+    if snapshots is not None:
+        if snapshot is not None or not isinstance(snapshots, list) or not snapshots:
+            raise ValueError("retrieval_snapshots requires a non-empty array; do not combine it with retrieval_snapshot")
+    else:
+        snapshots = [snapshot] if isinstance(snapshot, dict) and "retrieval_id" in snapshot else []
+    snapshot_authoritative = bool(snapshots)
+    snapshot_ids: list[str] = []
+    snapshot_hit_count = 0
+    snapshot_queries: list[str] = []
+    snapshot_sessions: list[str] = []
+    snapshot_topics: list[str] = []
+    if snapshot_authoritative:
+        retrieval_ids: list[str] = []
+        all_items: list[dict[str, Any]] = []
+        for result in snapshots:
+            if not isinstance(result, dict):
+                raise ValueError("retrieval_snapshot must be an object")
+            retrieval_id = result.get("retrieval_id")
+            if not isinstance(retrieval_id, str) or not RETRIEVAL_ID_RE.fullmatch(retrieval_id):
+                raise ValueError("retrieval_snapshot requires a valid retrieval_id")
+            if retrieval_id in retrieval_ids:
+                raise ValueError("retrieval_snapshots retrieval IDs must be unique")
+            items = result.get("items")
+            if not isinstance(items, list) or any(
+                not isinstance(item, dict) or not isinstance(item.get("entry_id"), str) or not item["entry_id"].strip()
+                for item in items
+            ):
+                raise ValueError("retrieval_snapshot.items must be an array of entry_id objects")
+            ids = [item["entry_id"].strip() for item in items]
+            if len(set(ids)) != len(ids):
+                raise ValueError("retrieval_snapshot entry IDs must be unique")
+            if "hit_count" in result and result["hit_count"] != len(ids):
+                raise ValueError("retrieval_snapshot hit_count conflicts with items")
+            retrieval_ids.append(retrieval_id)
+            snapshot_ids.extend(ids)
+            all_items.extend(items)
+            snapshot_queries.extend(_list_from_payload(result.get("query")))
+            snapshot_sessions.extend(_list_from_payload(result.get("session_id")))
+            snapshot_topics.extend(_list_from_payload(result.get("topic_id")))
+        snapshot_hit_count = len(all_items)
+        snapshot_ids = _dedupe(snapshot_ids)
+        if linked_retrieval_ids and linked_retrieval_ids != retrieval_ids:
+            raise ValueError("retrieval_snapshot conflicts with linked retrieval ids")
+        linked_retrieval_ids = retrieval_ids
+        compact_items = _compact_retrieval_items(all_items)
+        if ("retrieval_items" in payload or retrieval_items_json) and retrieval_items != compact_items:
+            raise ValueError("retrieval_snapshot conflicts with retrieval_items")
+        retrieval_items = compact_items
     ctx = resolve_context(
         cwd=Path.cwd(),
         repo_name_override=(args.repo.strip() or None),
@@ -417,7 +477,7 @@ def build_closeout(args: argparse.Namespace) -> dict[str, Any]:
         debug=bool(getattr(args, "debug", False)),
     )
 
-    queries = _dedupe([*_list_from_payload(payload.get("queries")), *args.query])
+    queries = _dedupe([*_list_from_payload(payload.get("queries")), *args.query, *snapshot_queries])
     legacy_used = _dedupe([*_list_from_payload(payload.get("used_entry_ids")), *args.used])
     adoption_effects_payload = payload.get("adoption_effects") if isinstance(payload.get("adoption_effects"), dict) else {}
     adoption_effects = {
@@ -453,6 +513,10 @@ def build_closeout(args: argparse.Namespace) -> dict[str, Any]:
             *args.allowed_hit_id,
         ]
     )
+    if snapshot_authoritative:
+        if hit_entry_ids and not set(hit_entry_ids).issubset(snapshot_ids):
+            raise ValueError("allowed hit ids must belong to retrieval_snapshot")
+        hit_entry_ids = snapshot_ids
 
     rejected_hit_ids = _dedupe(
         [
@@ -483,7 +547,7 @@ def build_closeout(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError(
             "miss_reason must be one of: " + ", ".join(sorted(MISS_REASONS))
         )
-    if hit_entry_ids:
+    if hit_entry_ids or snapshot_authoritative:
         invalid_rejected = [entry_id for entry_id in rejected_hit_ids if entry_id not in set(hit_entry_ids)]
         if invalid_rejected:
             raise ValueError(
@@ -495,7 +559,11 @@ def build_closeout(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("an entry cannot be both adopted and rejected: " + ", ".join(overlap))
 
     hit_count = _coerce_int(payload.get("hit_count", args.hit_count), 0)
-    if retrieval_items and "hit_count" not in payload and args.hit_count == 0:
+    if snapshot_authoritative:
+        if ("hit_count" in payload or args.hit_count != 0) and hit_count != snapshot_hit_count:
+            raise ValueError("hit_count conflicts with retrieval_snapshot")
+        hit_count = snapshot_hit_count
+    elif retrieval_items and "hit_count" not in payload and args.hit_count == 0:
         hit_count = len(retrieval_items)
     if hit_count < 0:
         raise ValueError("hit_count must be >= 0")
@@ -504,8 +572,8 @@ def build_closeout(args: argparse.Namespace) -> dict[str, Any]:
     rag_calls_raw = payload.get("rag_calls", args.rag_calls)
     rag_calls_inferred = False
     if not rag_calls_explicit:
-        rag_calls = max(len(queries), 1 if hit_count > 0 else 0)
-        rag_calls_inferred = bool(queries or hit_count > 0)
+        rag_calls = max(len(linked_retrieval_ids), len(queries), 1 if hit_count > 0 else 0)
+        rag_calls_inferred = bool(linked_retrieval_ids or queries or hit_count > 0)
     else:
         rag_calls = _coerce_int(rag_calls_raw, 0)
         if rag_calls == 0 and (queries or hit_count > 0):
@@ -515,7 +583,15 @@ def build_closeout(args: argparse.Namespace) -> dict[str, Any]:
 
     legacy_unlinked = bool(getattr(args, "legacy_allow_unlinked_retrievals", False))
     attempts = []
-    for spec in getattr(args, "unresolved_attempt", []) or []:
+    payload_attempts = payload.get("unresolved_retrieval_attempts", [])
+    if not isinstance(payload_attempts, list):
+        raise ValueError("unresolved_retrieval_attempts must be an array")
+    attempt_specs = []
+    for attempt in payload_attempts:
+        if not isinstance(attempt, dict) or not isinstance(attempt.get("attempt_id"), str) or not isinstance(attempt.get("state"), str):
+            raise ValueError("unresolved_retrieval_attempts requires attempt_id and state strings")
+        attempt_specs.append(attempt["attempt_id"] + "=" + attempt["state"])
+    for spec in [*attempt_specs, *(getattr(args, "unresolved_attempt", []) or [])]:
         attempt_id, separator, state = spec.partition("=")
         if not separator or not RETRIEVAL_ID_RE.fullmatch(attempt_id) or state not in {"pending", "failed", "unavailable", "aborted", "unknown"}:
             raise ValueError("--unresolved-attempt requires ID=pending|failed|unavailable|aborted|unknown")
@@ -540,7 +616,7 @@ def build_closeout(args: argparse.Namespace) -> dict[str, Any]:
     ):
         raise ValueError("reason/skipped_reason is required when no used/written/updated entry ids are recorded")
 
-    if hit_entry_ids:
+    if hit_entry_ids or snapshot_authoritative:
         invalid_used = [entry_id for entry_id in adopted if entry_id not in set(hit_entry_ids)]
         if invalid_used:
             raise ValueError(f"--used entries must belong to allowed hit ids: {', '.join(invalid_used)}")
@@ -568,8 +644,12 @@ def build_closeout(args: argparse.Namespace) -> dict[str, Any]:
         "cwd": str(Path.cwd()),
         "repo": ctx.repo_name,
         "branch": ctx.branch,
-        "session_id": str(getattr(args, "session_id", "") or "").strip() or str(payload.get("session_id") or "").strip(),
-        "topic_id": str(getattr(args, "topic_id", "") or "").strip() or str(payload.get("topic_id") or "").strip(),
+        "session_id": runtime_session_id(
+            str(getattr(args, "session_id", "") or payload.get("session_id") or ""),
+            snapshot_sessions[0] if len(set(snapshot_sessions)) == 1 else "",
+        ),
+        "topic_id": str(getattr(args, "topic_id", "") or payload.get("topic_id") or "").strip()
+                    or (snapshot_topics[0] if len(set(snapshot_topics)) == 1 else ""),
         "rag_calls": rag_calls,
         "queries": queries,
         "hit_count": hit_count,
@@ -590,22 +670,63 @@ def build_closeout(args: argparse.Namespace) -> dict[str, Any]:
     if attempts:
         closeout["unresolved_retrieval_attempts"] = attempts
         closeout["completed_retrieval_count"] = len(linked_retrieval_ids)
-    review = getattr(args, "memory_review", "")
+    review_payload = payload.get("memory_review", {})
+    if not isinstance(review_payload, dict):
+        raise ValueError("memory_review must be an object")
+    review = getattr(args, "memory_review", "") or review_payload.get("disposition", "")
     if review:
-        review_reason = str(getattr(args, "memory_review_reason", "") or "").strip()
+        if not isinstance(review, str) or review not in MEMORY_REVIEW_STATES:
+            raise ValueError("invalid memory_review disposition")
+        review_reason = str(getattr(args, "memory_review_reason", "") or review_payload.get("reason", "") or "").strip()
         if not review_reason:
             raise ValueError("--memory-review-reason is required with --memory-review")
         if (review == "written" and not written) or (review == "updated" and not updated):
             raise ValueError("written/updated memory review requires the corresponding entry IDs")
         closeout["memory_review"] = {"disposition": review, "reason": _clip(review_reason)}
+        for field, allowed in {
+            "target": {"builtin_memory", "personal_kb", "task_writes", "unknown"},
+            "instruction_source": {"system", "developer", "user", "task", "unknown"},
+        }.items():
+            if field in review_payload:
+                value = review_payload[field]
+                if not isinstance(value, str) or value not in allowed:
+                    raise ValueError(f"invalid memory_review {field}")
+                closeout["memory_review"][field] = value
+    elif review_payload:
+        raise ValueError("memory_review requires disposition and reason")
+    if written or updated:
+        import kb_domain
+        owners = set(written) | set(updated)
+        links = []
+        for record in kb_domain.load_graph()["entries"]:
+            if record.get("id") not in owners or record.get("_deleted"):
+                continue
+            domain = record["domain"]
+            for edge in domain.get("relations", []):
+                if edge["type"] == "supersedes" and edge["state"] == "confirmed":
+                    links.append({"entry_id": record["id"], "successor": domain["entity_id"],
+                                  "predecessor": edge["target"], "scope": edge.get("scope", {}),
+                                  "valid_from": edge.get("valid_from", domain.get("valid_from", ""))})
+        if links:
+            closeout["replacement_links"] = links
     if session_brief_used:
         closeout["session_brief_used_entry_ids"] = session_brief_used
     if hit_entry_ids:
         closeout["hit_entry_ids"] = hit_entry_ids
-    if retrieval_items:
+    if telemetry_present:
         closeout["retrieval_items"] = retrieval_items
     if rejected_hit_ids:
         closeout["rejected_hit_ids"] = rejected_hit_ids
+    gap = payload.get("memory_gap")
+    if gap is not None:
+        categories = {"missing_record", "missed_trigger", "missed_recall", "wrong_scope",
+                      "stale_fact", "unused_hit", "late_use", "broken_evidence"}
+        if not isinstance(gap, dict) or not isinstance(gap.get("stage"), str) or gap["stage"] not in categories:
+            raise ValueError("memory_gap requires a supported stage")
+        evidence = gap.get("evidence")
+        if not isinstance(evidence, str) or not evidence.strip():
+            raise ValueError("memory_gap requires a short evidence pointer")
+        closeout["memory_gap"] = {"stage": gap["stage"], "evidence": _clip(evidence.strip())}
     if rejection_reasons:
         closeout["rejection_reasons"] = rejection_reasons
     if miss_reason:
@@ -617,6 +738,12 @@ def build_closeout(args: argparse.Namespace) -> dict[str, Any]:
     extra = payload.get("extra")
     if isinstance(extra, dict):
         closeout["extra"] = extra
+    if getattr(args, "require_complete_context", False):
+        missing = [key for key in ("session_id", "topic_id", "memory_review") if not closeout.get(key)]
+        if linked_retrieval_ids and not telemetry_present:
+            missing.append("retrieval_snapshot(s) or retrieval_items")
+        if missing:
+            raise ValueError("complete closeout context requires: " + ", ".join(missing))
     return closeout
 
 
@@ -668,6 +795,8 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--branch", default="", help="Override branch bucket for closeout context")
     parser.add_argument("--json", default="", help="Inline JSON object to merge into closeout")
     parser.add_argument("--json-file", default="", help="Read closeout JSON object from a UTF-8 file")
+    parser.add_argument("--require-complete-context", action="store_true",
+                        help="Validate session/topic identity, memory assessment and observed retrieval telemetry before side effects")
     parser.add_argument("--auto-session-brief", action="store_true", help="Write a recent session brief when an explicit summary is provided")
     parser.add_argument("--session-brief-title", default="", help="Override recent session brief title")
     parser.add_argument("--session-brief-summary", default="", help="Override recent session brief summary")
@@ -714,10 +843,13 @@ def main(argv: list[str]) -> int:
 
     path = runtime_file("closeout.jsonl", base_dir=kb_base_dir())
     try:
-        apply_used_entries(closeout, args)
-        apply_session_brief(closeout, args, session_brief_payload)
+        with span("closeout.adoption"):
+            apply_used_entries(closeout, args)
+        with span("closeout.session_brief"):
+            apply_session_brief(closeout, args, session_brief_payload)
         closeout["status"] = "partial_failure" if closeout.get("heat_failed_entry_ids") else "ok"
-        append_jsonl(path, closeout)
+        with span("closeout.append"):
+            append_jsonl(path, closeout)
     except ValueError as exc:
         sys.stderr.write(f"{exc}\n")
         return 2

@@ -165,14 +165,14 @@ def test_active_credentials_are_retained_verbatim_locally() -> None:
         assert env_summary["storage_protection"] == "filesystem-permissions-only"
 
 
-def _guard_fixture(root: Path) -> dict[str, Path]:
+def _guard_fixture(layout: kb_lib.StorageLayout) -> dict[str, Path]:
     paths = {
-        "record": root / "repos" / "study" / "main" / "implementation" / "kb.jsonl",
-        "challenge": root / "repos" / "_meta" / "challenge_events.jsonl",
-        "effectiveness": root / "repos" / "_meta" / "codex_kb_effectiveness_log.jsonl",
-        "manifest": root / "manifests" / "retained-files.jsonl",
-        "retained": root / "retained-files" / "study" / "case" / "evidence.txt",
-        "cache": root / "_meta" / "_index" / "keywords.json",
+        "record": layout.records / "study" / "main" / "implementation" / "kb.jsonl",
+        "challenge": layout.runtime / "challenge_events.jsonl",
+        "effectiveness": layout.runtime / "codex_kb_effectiveness_log.jsonl",
+        "manifest": layout.manifests / "retained-files.jsonl",
+        "retained": layout.retained_files / "study" / "case" / "evidence.txt",
+        "cache": layout.cache / "keywords.json",
     }
     for name, path in paths.items():
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -183,8 +183,8 @@ def _guard_fixture(root: Path) -> dict[str, Path]:
 def test_guard_covers_all_production_storage_except_cache() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         production_root = Path(temp_dir) / "production"
-        paths = _guard_fixture(production_root)
         with patch.dict(os.environ, {"PERSONAL_KB_ROOT": str(production_root)}, clear=False):
+            paths = _guard_fixture(kb_lib.storage_layout())
             guard = kb_test_guard.activate(__file__)
             assert guard.production_layout.root == production_root.resolve()
             assert Path(os.environ["PERSONAL_KB_ROOT"]).resolve() != production_root.resolve()

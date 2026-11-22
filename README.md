@@ -89,3 +89,5 @@ python3 scripts/kb_smoke_test.py . --root-layout
 ## 最近迭代
 
 - [2026-09-20 至 10-04 会话复盘与已实施优化](docs/session-review-20261004.md)：异步结果交付、身份与续接、业务召回、真实失败闭环和版本一致性。
+
+[2026-10-22 implementation and validation](docs/req/001-personal-kb-taxonomy/iteration-20261022.md) covers structured closeout, retrieval noise, portable regression fixtures and current evidence limits.

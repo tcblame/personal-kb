@@ -35,8 +35,8 @@ def build_identity() -> dict:
             'capabilities': ['session-topic-identity', 'scope-anchor', 'exclusive-receipt',
                              'unresolved-attempt-closeout', 'own-rollout-identity',
                              'domain-model-v1', 'project-graph-retrieval', 'scoped-supersession',
-                             'dated-object-history', 'focused-action-recall',
-                             'contextual-project-routing', 'as-of-recall', 'paired-alias-learning']}
+                             'dated-object-history', 'focused-action-recall', 'memory-gap-feedback',
+                             'contextual-project-routing', 'as-of-recall', 'paired-alias-learning', 'zstd-rollout-audit']}
 
 
 def main(argv: list[str]) -> int:

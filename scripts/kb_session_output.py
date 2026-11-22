@@ -2,12 +2,75 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 from typing import Any
 
 
 RETRIEVAL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 RAG_TEXT_RETRIEVAL_ID_RE = re.compile(r'retrieval_id="([A-Za-z0-9._:-]+)"')
 RAG_TEXT_HITS_RE = re.compile(r"\bhits=(\d+)(?=\s|$)")
+
+
+def _command_key(command: str) -> tuple[str, ...]:
+    try:
+        return tuple(shlex.split(command))
+    except ValueError:
+        return (command.strip(),)
+
+
+def shell_completion_outputs(rows: list[dict], calls: list[dict], session_id: str) -> dict[tuple[str, int], str]:
+    """Match actual shell completions to original commands, without timing guesses.
+
+    Keep shell completion separate from model-visible tool delivery. A failed
+    wrapper chain does not establish that a later retrieval actually ran.
+    """
+    import kb_command_contract as contract
+    from kb_exec_parse import commands as js_commands
+
+    completed: dict[str, dict] = {}
+    for index, row in enumerate(rows):
+        payload = row.get("payload") or {}
+        item = payload.get("item") or {}
+        if (row.get("type") != "event_msg" or payload.get("type") != "item_completed"
+                or item.get("type") != "CommandExecution"
+                or not isinstance(item.get("exit_code"), int)):
+            continue
+        if payload.get("thread_id") and payload["thread_id"] != session_id:
+            continue
+        command = item.get("command") or ""
+        if isinstance(command, list):
+            command = command[-1] if len(command) >= 3 and command[-2] in {"-c", "-lc"} else shlex.join(command)
+        completed[str(item.get("id") or f"row-{index}")] = {
+            "key": _command_key(str(command)), "turn_id": str(payload.get("turn_id") or ""),
+            "output": json.dumps({"output": str(item.get("aggregated_output") or item.get("stdout") or ""),
+                                  "exit_code": item["exit_code"]}),
+        }
+    available = list(completed.values())
+    matched: dict[tuple[str, int], str] = {}
+    for info in calls:
+        payload = (info.get("row") or info).get("payload") or {}
+        call_id = str(payload.get("call_id") or "")
+        if payload.get("type") == "custom_tool_call":
+            raw_commands = js_commands(str(payload.get("input") or ""))
+        else:
+            try:
+                args = json.loads(payload.get("arguments") or "{}")
+            except (ValueError, TypeError):
+                args = {}
+            raw_commands = [str(args.get("cmd") or "")]
+        offset = 0
+        for command in raw_commands:
+            segments = contract.split_shell_commands(command)
+            key = _command_key(command)
+            turn_id = str(info.get("turn_id") or "")
+            index = next((i for i, event in enumerate(available)
+                          if event["key"] == key and (not turn_id or not event["turn_id"] or turn_id == event["turn_id"])), None)
+            if index is not None:
+                event = available.pop(index)
+                for position in range(len(segments)):
+                    matched[(call_id, offset + position)] = event["output"]
+            offset += len(segments)
+    return matched
 
 
 def output_text(value: Any) -> str:

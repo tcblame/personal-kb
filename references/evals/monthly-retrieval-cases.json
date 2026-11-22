@@ -1,0 +1,175 @@
+{
+  "version": "2026-10-22",
+  "cases": [
+    {
+      "id": "p1-host",
+      "query": "Thor SSH 设备地址映射",
+      "category": "positive"
+    },
+    {
+      "id": "p2-git",
+      "query": "files 本地问卷 Git 提交位置",
+      "category": "positive"
+    },
+    {
+      "id": "p3-address",
+      "query": "Thor SSH地址变更 默认Skill MCP 同步",
+      "category": "positive"
+    },
+    {
+      "id": "p4-unity",
+      "query": "holographic_digitizer Unity APK源码",
+      "category": "positive"
+    },
+    {
+      "id": "p5-tools",
+      "query": "Unity CLI Pipeline MCP 工具回退顺序",
+      "category": "positive"
+    },
+    {
+      "id": "p6-codex",
+      "query": "Codex 上下文压缩 token 成本",
+      "category": "positive"
+    },
+    {
+      "id": "p7-business",
+      "query": "数字人 自由对话 96 token 限制",
+      "category": "positive"
+    },
+    {
+      "id": "p8-cross",
+      "query": "Codex WSL 代理连接诊断",
+      "category": "positive"
+    },
+    {
+      "id": "n1-host-model",
+      "query": "Thor 本地模型 cache vllm 权重资产丢失",
+      "category": "negative"
+    },
+    {
+      "id": "n2-host-tts",
+      "query": "Thor TTS initial_codec_chunk_frames CUDA Graph 调优",
+      "category": "negative"
+    },
+    {
+      "id": "n3-git-model",
+      "query": "Thor 本地模型 cache vllm 权重资产丢失",
+      "category": "negative"
+    },
+    {
+      "id": "n4-git-codex",
+      "query": "Codex provider relay default config",
+      "category": "negative"
+    },
+    {
+      "id": "n5-address-codex",
+      "query": "Codex provider custom relay default provider dots features config",
+      "category": "negative"
+    },
+    {
+      "id": "n6-address-tts",
+      "query": "Thor TTS 首音延迟 firstPCM 固定问卷缓存",
+      "category": "negative"
+    },
+    {
+      "id": "n7-unity-tts",
+      "query": "Thor TTS initial_codec_chunk_frames CUDA Graph 调优",
+      "category": "negative"
+    },
+    {
+      "id": "n8-unity-provider",
+      "query": "Codex provider custom relay features config",
+      "category": "negative"
+    },
+    {
+      "id": "n9-tools-latency",
+      "query": "Thor TTS 首音延迟 Unity firstMs TTS-Play 首PCM 起播 固定问卷缓存",
+      "category": "negative"
+    },
+    {
+      "id": "n10-tools-model",
+      "query": "Thor 本地模型 cache vllm 权重资产丢失",
+      "category": "negative"
+    },
+    {
+      "id": "b1-superseded",
+      "query": "retired-probe 历史配置",
+      "category": "boundary"
+    },
+    {
+      "id": "b2-candidate",
+      "query": "candidate-probe 未确认配置",
+      "category": "boundary"
+    },
+    {
+      "id": "b3-history",
+      "query": "retired-probe 历史配置",
+      "category": "boundary",
+      "options": [
+        "--include-noncurrent"
+      ]
+    },
+    {
+      "id": "b4-role",
+      "query": "用 Codex 帮我查数字人 96 token 限制",
+      "category": "boundary"
+    },
+    {
+      "id": "b5-subject",
+      "query": "Codex token 对话 上下文压缩",
+      "category": "boundary"
+    },
+    {
+      "id": "b6-cross-project",
+      "query": "WSL 代理连接诊断",
+      "category": "boundary"
+    },
+    {
+      "id": "r1-history",
+      "category": "routing_simulator",
+      "prompt": "按昨天确认过的方案继续",
+      "context": {
+        "cross_session_dependency": true
+      }
+    },
+    {
+      "id": "r2-current",
+      "category": "routing_simulator",
+      "prompt": "根据当前异常栈修复",
+      "context": {
+        "current_evidence_fully_answers_task": true
+      }
+    },
+    {
+      "id": "r3-forbidden",
+      "category": "routing_simulator",
+      "prompt": "不要用知识库，查看当前文件",
+      "context": {
+        "explicit_kb_forbidden": true
+      }
+    },
+    {
+      "id": "r4-worker",
+      "category": "routing_simulator",
+      "prompt": "查上次的部署决定",
+      "context": {
+        "agent_role": "worker",
+        "cross_session_dependency": true
+      }
+    },
+    {
+      "id": "r5-audit",
+      "category": "routing_simulator",
+      "prompt": "审计 Personal KB 运行效果",
+      "context": {}
+    },
+    {
+      "id": "r6-reuse",
+      "category": "routing_simulator",
+      "prompt": "继续使用已返回的历史线索",
+      "context": {
+        "scout_brief_received": true
+      }
+    }
+  ]
+}

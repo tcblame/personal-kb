@@ -1,0 +1,207 @@
+{
+  "records": [
+    {
+      "id": "host-map",
+      "kind": "map",
+      "repo": "field-a",
+      "branch": "main",
+      "title": "Thor SSH 设备地址映射",
+      "aliases": [
+        "Thor设备",
+        "Thor主机",
+        "SSH那台设备"
+      ],
+      "trigger_terms": [
+        "Thor",
+        "SSH地址"
+      ],
+      "ts": "2026-10-22T00:00:00",
+      "status": "current",
+      "story": "Synthetic historical lead; verify current evidence."
+    },
+    {
+      "id": "git-location",
+      "kind": "requirement",
+      "repo": "field-a",
+      "branch": "main",
+      "title": "files 项目 Git 提交位置纠正",
+      "aliases": [
+        "files 本地仓库",
+        "本地问卷 Git"
+      ],
+      "trigger_terms": [
+        "本地问卷",
+        "Git 提交",
+        "Thor",
+        "当前分支"
+      ],
+      "ts": "2026-10-22T00:00:00",
+      "status": "current",
+      "story": "Synthetic historical lead; verify current evidence."
+    },
+    {
+      "id": "address-policy",
+      "kind": "requirement",
+      "repo": "field-a",
+      "branch": "main",
+      "title": "远程地址变更同步默认 Skill 与两套 MCP",
+      "aliases": [
+        "默认 Skill 与 MCP 同步",
+        "Thor 配置双更新"
+      ],
+      "trigger_terms": [
+        "Thor",
+        "SSH地址变更",
+        "默认Skill",
+        "MCP",
+        "Codex",
+        "Cursor"
+      ],
+      "ts": "2026-10-22T00:00:00",
+      "status": "current",
+      "story": "Synthetic historical lead; verify current evidence."
+    },
+    {
+      "id": "unity-map",
+      "kind": "map",
+      "repo": "field-a",
+      "branch": "main",
+      "title": "holographic_digitizer Unity MCP 接入映射",
+      "aliases": [
+        "Unity 数字人工程",
+        "Unity APK源码"
+      ],
+      "trigger_terms": [
+        "holographic_digitizer",
+        "APK源码",
+        "VoiceTTS",
+        "StreamingPcmMetrics"
+      ],
+      "ts": "2026-10-22T00:00:00",
+      "status": "current",
+      "story": "Synthetic historical lead; verify current evidence."
+    },
+    {
+      "id": "unity-tools",
+      "kind": "requirement",
+      "repo": "_global",
+      "branch": "main",
+      "title": "Unity CLI/Pipeline 优先 MCP 次之 Computer Use 兜底",
+      "aliases": [
+        "Unity 工具回退顺序",
+        "数字人 Unity 工具策略"
+      ],
+      "trigger_terms": [
+        "Unity CLI",
+        "Unity MCP",
+        "Computer Use",
+        "数字人 Unity"
+      ],
+      "ts": "2026-10-22T00:00:00",
+      "status": "current",
+      "story": "Synthetic historical lead; verify current evidence."
+    },
+    {
+      "id": "codex-context",
+      "kind": "experience",
+      "repo": "tools",
+      "branch": "main",
+      "title": "Codex 上下文压缩与 token 成本",
+      "aliases": [
+        "上下文压缩"
+      ],
+      "trigger_terms": [
+        "Codex",
+        "token"
+      ],
+      "ts": "2026-10-22T00:00:00",
+      "status": "current",
+      "story": "Synthetic historical lead; verify current evidence."
+    },
+    {
+      "id": "business",
+      "kind": "experience",
+      "repo": "business",
+      "branch": "main",
+      "title": "数字人自由对话 96 token 限制",
+      "aliases": [
+        "数字人",
+        "96 token",
+        "自由对话"
+      ],
+      "trigger_terms": [
+        "token",
+        "对话"
+      ],
+      "ts": "2026-10-22T00:00:00",
+      "status": "current",
+      "story": "Synthetic historical lead; verify current evidence."
+    },
+    {
+      "id": "shared-wsl",
+      "kind": "experience",
+      "repo": "other",
+      "branch": "main",
+      "title": "WSL 代理连接诊断",
+      "aliases": [
+        "WSL 代理"
+      ],
+      "trigger_terms": [
+        "WSL",
+        "代理连接"
+      ],
+      "ts": "2026-10-22T00:00:00",
+      "status": "current",
+      "story": "Synthetic historical lead; verify current evidence."
+    },
+    {
+      "id": "codex-install",
+      "kind": "map",
+      "repo": "tools",
+      "branch": "main",
+      "title": "Codex MCP 安装与配置",
+      "aliases": [
+        "Codex"
+      ],
+      "trigger_terms": [
+        "Codex",
+        "MCP"
+      ],
+      "ts": "2026-10-22T00:00:00",
+      "status": "current",
+      "story": "Synthetic historical lead; verify current evidence."
+    },
+    {
+      "id": "inactive",
+      "kind": "experience",
+      "repo": "other",
+      "branch": "main",
+      "title": "retired-probe 历史配置",
+      "aliases": [
+        "retired-probe"
+      ],
+      "trigger_terms": [
+        "retired-probe"
+      ],
+      "ts": "2026-10-22T00:00:00",
+      "status": "superseded",
+      "story": "Synthetic historical lead; verify current evidence."
+    },
+    {
+      "id": "pending",
+      "kind": "experience",
+      "repo": "other",
+      "branch": "main",
+      "title": "candidate-probe 未确认配置",
+      "aliases": [
+        "candidate-probe"
+      ],
+      "trigger_terms": [
+        "candidate-probe"
+      ],
+      "ts": "2026-10-22T00:00:00",
+      "status": "candidate",
+      "story": "Synthetic historical lead; verify current evidence."
+    }
+  ]
+}

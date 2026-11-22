@@ -73,6 +73,7 @@ FORBIDDEN_DATA_DIRECTORIES = {
     "storage",
 }
 PUBLIC_TESTS = {
+    "kb_recent_lifecycle_test.py",
     "kb_session_review_test.py",
     "kb_audit_codex_sessions_test.py",
     "kb_audit_cursor_sessions_test.py",
@@ -82,6 +83,10 @@ PUBLIC_TESTS = {
     "kb_retain_file_test.py",
     "kb_release_test.py",
     "kb_domain_test.py",
+    "kb_closeout_contract_test.py",
+    "kb_monthly_regression_test.py",
+    "kb_optimization_test.py",
+    "kb_timing_test.py",
 }
 
 
@@ -262,7 +267,18 @@ def _copy_tree_allowlisted(source: Path, staging: Path) -> list[str]:
             copied.append(str(Path("docs/req/001-personal-kb-taxonomy/evals") / filename))
             _copy_text(eval_source, bundled_eval_target_dir / filename)
             copied.append(str(Path("references/evals") / filename))
+    for filename in ("monthly-retrieval-corpus.json", "monthly-retrieval-cases.json", "monthly-retrieval-gold.json"):
+        eval_source = source / "references" / "evals" / filename
+        if eval_source.is_file():
+            _copy_text(eval_source, bundled_eval_target_dir / filename)
+            copied.append(str(Path("references/evals") / filename))
+    implementation_note = source / "docs" / "req" / "001-personal-kb-taxonomy" / "iteration-20261022.md"
+    if implementation_note.is_file():
+        relative = Path("docs/req/001-personal-kb-taxonomy/iteration-20261022.md")
+        _copy_text(implementation_note, staging / relative)
+        copied.append(str(relative))
     return sorted(copied)
+
 
 
 def _root_layout_findings(root: Path) -> list[str]:

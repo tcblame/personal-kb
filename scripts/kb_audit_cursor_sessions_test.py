@@ -4,6 +4,10 @@ import json
 import tempfile
 from pathlib import Path
 
+import kb_test_guard
+
+_TEST_GUARD = kb_test_guard.activate(__file__) if __name__ == "__main__" else None
+
 import kb_audit_cursor_sessions as audit
 
 
@@ -29,7 +33,12 @@ def test_cursor_transcript_counts_requests_without_claiming_success() -> None:
     assert report["tool_result_items"] == 0
 
 
-if __name__ == "__main__":
+def main():
     test_shell_request_and_heredoc_are_separated()
     test_cursor_transcript_counts_requests_without_claiming_success()
     print("kb_cursor_audit tests passed")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_TEST_GUARD.run(main))

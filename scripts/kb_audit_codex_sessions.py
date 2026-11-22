@@ -8,9 +8,10 @@ import json
 import re
 import shlex
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from kb_lib import runtime_file
 from kb_runtime import is_test_event
@@ -62,7 +63,7 @@ CUSTOM_EXEC_CMD_RE = re.compile(
 UUID_RE = re.compile(
     r"(?i)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
 )
-PARSER_VERSION = "codex-shell-v12"
+PARSER_VERSION = "codex-shell-v13"
 HUMAN_LABEL_VALUES = frozenset({"confirmed_missed_retrieval", "auditor_false_positive"})
 
 
@@ -302,6 +303,7 @@ def _as_int(value: Any) -> int:
 # Shared with curate-sessions so inherited metadata has one interpretation.
 from kb_session_identity import filename_session_id as _filename_session_id
 from kb_session_identity import select_session_meta as _select_session_meta
+from kb_session_identity import default_sessions_root, open_rollout, rollout_paths
 
 
 def _is_subagent_meta(meta: dict[str, Any]) -> bool:
@@ -495,12 +497,17 @@ def _match_rag_closeouts(
 
 
 def _session_paths(root: Path, dates: list[str]) -> list[Path]:
-    out: list[Path] = []
-    for raw in dates:
-        d = datetime.strptime(raw, "%Y-%m-%d").date()
-        day_dir = root / f"{d:%Y}" / f"{d:%m}" / f"{d:%d}"
-        out.extend(sorted(day_dir.glob("*.jsonl")))
-    return out
+    wanted = set(dates)
+    latest_start = (date.fromisoformat(max(dates)) + timedelta(days=1)).isoformat()
+    since = datetime.strptime(min(dates), "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp() - 86400
+    result = []
+    for path in rollout_paths(root):
+        stamp = re.match(r"rollout-(\d{4}-\d{2}-\d{2})", path.name)
+        start = stamp[1] if stamp else ""
+        if start <= latest_start and (start in wanted or path.stat().st_mtime >= since
+                                      or "/".join(path.parent.parts[-3:]).replace("/", "-") in wanted):
+            result.append(path)
+    return result
 
 
 def _default_dates(days: int) -> list[str]:
@@ -526,7 +533,7 @@ def _process_retrieval_evidence(rows: list[dict], session_id: str, delivered: se
         scripts = [s for segment in command_contract.split_shell_commands(str(command)) for s in _detected_scripts(segment)]
         if "kb_rag_context" not in scripts:
             continue
-        for result in session_output.retrieval_results(str(item.get("stdout") or "")):
+        for result in session_output.retrieval_results(str(item.get("aggregated_output") or item.get("stdout") or "")):
             retrieval_id = result.get("retrieval_id")
             if not retrieval_id:
                 continue
@@ -538,7 +545,7 @@ def _process_retrieval_evidence(rows: list[dict], session_id: str, delivered: se
     return list(found.values())
 
 
-def _parse_session(path: Path) -> dict[str, Any]:
+def _parse_session(path: Path, *, dates: list[str] | None = None, timezone_name: str = "UTC") -> dict[str, Any]:
     user_msgs: list[str] = []
     rows: list[dict[str, Any]] = []
     call_rows: list[dict[str, Any]] = []
@@ -550,15 +557,36 @@ def _parse_session(path: Path) -> dict[str, Any]:
     execution_unknown_kb_call_count = 0
     terminal_status = "unknown"
 
-    for line in path.read_text(errors="replace").splitlines():
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(obj, dict):
-            rows.append(obj)
+    with open_rollout(path) as stream:
+        for line in stream:
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict):
+                rows.append(obj)
 
     meta = _select_session_meta(path, rows)
+    window_unknown_rows = 0
+    in_requested_window = dates is None
+    if dates is not None:
+        wanted = set(dates)
+        zone = ZoneInfo(timezone_name)
+        selected = []
+        for row in rows:
+            if row.get("type") in {"session_meta", "turn_context"}:
+                selected.append(row)
+                continue
+            try:
+                stamp = datetime.fromisoformat(str(row.get("timestamp") or "").replace("Z", "+00:00"))
+                stamp = stamp.replace(tzinfo=timezone.utc) if stamp.tzinfo is None else stamp
+                if stamp.astimezone(zone).date().isoformat() not in wanted:
+                    continue
+            except ValueError:
+                window_unknown_rows += 1
+            selected.append(row)
+            in_requested_window = True
+        rows = selected
     current_turn_id = ""
     for obj in rows:
         payload = obj.get("payload") or {}
@@ -608,6 +636,7 @@ def _parse_session(path: Path) -> dict[str, Any]:
     closeout_request_count = 0
     rag_events: list[dict[str, Any]] = []
     closeout_events: list[dict[str, Any]] = []
+    completion_outputs = session_output.shell_completion_outputs(rows, call_rows, str(meta.get("id") or ""))
     for call_info in call_rows:
         call = call_info["row"]
         payload = call.get("payload") or {}
@@ -617,7 +646,9 @@ def _parse_session(path: Path) -> dict[str, Any]:
         retrieval_results = session_output.retrieval_results(output)
         retrieval_result_index = 0
         rag_command_count = sum("kb_rag_context" in _detected_scripts(c) for c in commands)
-        for cmd in commands:
+        for command_index, cmd in enumerate(commands):
+            command_output = completion_outputs.get((str(payload.get("call_id") or ""), command_index), output)
+            command_results = session_output.retrieval_results(command_output)
             tokens = _parse_cli_tokens(cmd)
             if "personal-kb/SKILL.md" in cmd and success is True:
                 counters["skill_read"] += 1
@@ -628,11 +659,11 @@ def _parse_session(path: Path) -> dict[str, Any]:
             detected_kb_call_count += len(scripts)
             rag_request_count += sum(k in {"kb_rag_context", "kb_search"} for k in scripts)
             closeout_request_count += int("kb_closeout" in scripts)
-            command_success = success
+            command_success = _execution_success(command_output)
             selected_result = None
             if "kb_rag_context" in scripts:
                 query = _normalized_query(_rag_query(tokens, KB_CALL_PATTERNS["kb_rag_context"]))
-                matches = [result for result in retrieval_results
+                matches = [result for result in command_results
                            if query and _normalized_query(str(result.get("query") or "")) == query]
                 if len(matches) == 1:
                     selected_result = matches[0]
@@ -705,6 +736,8 @@ def _parse_session(path: Path) -> dict[str, Any]:
         "is_subagent": is_subagent,
         "is_main": is_main,
         "terminal_status": terminal_status,
+        "in_requested_window": in_requested_window,
+        "window_unknown_timestamp_rows": window_unknown_rows,
         "terminal_aborted": terminal_status == "turn_aborted",
         "subagent_parent_thread_id": _subagent_parent_thread_id(meta),
         "user_excerpt": user_text[:180],
@@ -770,8 +803,15 @@ def _read_closeouts(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def _closeout_date(row: dict[str, Any]) -> str:
+def _closeout_date(row: dict[str, Any], timezone_name: str | None = None) -> str:
     raw = str(row.get("ts") or "").strip()
+    if timezone_name:
+        try:
+            stamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            stamp = stamp.replace(tzinfo=timezone.utc) if stamp.tzinfo is None else stamp
+            return stamp.astimezone(ZoneInfo(timezone_name)).date().isoformat()
+        except ValueError:
+            return ""
     match = re.match(r"^(\d{4}-\d{2}-\d{2})", raw)
     return match.group(1) if match else ""
 
@@ -924,15 +964,23 @@ def _reconcile_parent_scout_sessions(sessions: list[dict[str, Any]]) -> dict[str
 
 
 def build_report(args: argparse.Namespace) -> dict[str, Any]:
-    dates = args.date or _default_dates(args.last_days)
+    timezone_name = getattr(args, "timezone", "UTC")
+    today = datetime.now(ZoneInfo(timezone_name)).date()
+    dates = args.date or [(today - timedelta(days=i)).isoformat() for i in range(max(1, args.last_days))]
     paths = _session_paths(Path(args.sessions_root).expanduser(), dates)
-    sessions = [_parse_session(path) for path in paths]
+    sessions, read_errors = [], []
+    for path in paths:
+        try:
+            sessions.append(_parse_session(path, dates=dates, timezone_name=timezone_name))
+        except (OSError, EOFError) as exc:
+            read_errors.append({"file": str(path), "error": str(exc)})
+    sessions = [session for session in sessions if session["in_requested_window"]]
     parent_scout_stats = _reconcile_parent_scout_sessions(sessions)
     date_set = set(dates)
     dated_closeouts = [
         row
         for row in _read_closeouts(Path(args.closeout).expanduser())
-        if _closeout_date(row) in date_set
+        if _closeout_date(row, timezone_name) in date_set
     ]
     include_test = bool(getattr(args, "include_test", False))
     excluded_test_rows = sum(is_test_event(row) for row in dated_closeouts) if not include_test else 0
@@ -1063,6 +1111,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "dates": dates,
         "session_files": len(paths),
+        "unreadable_files": read_errors,
         "sessions_by_source": dict(by_source),
         "kb_activity_sessions": len(kb_activity),
         "main_sessions": count(lambda s: s["is_main"]),
@@ -1112,6 +1161,8 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
 
 def _print_text(report: dict[str, Any]) -> None:
     print(f"KB_CODEX_SESSION_AUDIT dates={','.join(report['dates'])} session_files={report['session_files']}")
+    for error in report.get("unreadable_files", []):
+        print(f"- unreadable {error['file']}: {error['error']}")
     print(f"- sessions_by_source: {report['sessions_by_source']}")
     print(f"- kb_activity_sessions: {report['kb_activity_sessions']}")
     print(f"- main_sessions: {report['main_sessions']}")
@@ -1153,9 +1204,10 @@ def _print_text(report: dict[str, Any]) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Read-only audit for Codex sessions and personal-kb runtime behavior.")
-    parser.add_argument("--sessions-root", default="~/.codex/sessions", help="Codex sessions root")
+    parser.add_argument("--sessions-root", default=str(default_sessions_root()), help="Codex sessions root, including its sibling archive")
     parser.add_argument("--date", action="append", default=[], help="Date to audit, YYYY-MM-DD; repeatable")
     parser.add_argument("--last-days", type=int, default=2, help="Audit today and previous N-1 days when --date is omitted")
+    parser.add_argument("--timezone", default="UTC", help="Calendar timezone for event dates, e.g. Asia/Shanghai")
     parser.add_argument("--closeout", default=str(runtime_file("closeout.jsonl")))
     parser.add_argument("--examples", type=int, default=5, help="Examples per issue type")
     parser.add_argument("--json", action="store_true", help="Print JSON")
@@ -1172,7 +1224,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:
         _print_text(report)
-    return 0
+    return 2 if report["unreadable_files"] else 0
 
 
 if __name__ == "__main__":

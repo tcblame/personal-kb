@@ -1,0 +1,201 @@
+{
+  "version": "2026-10-22",
+  "scope": "Frozen before retrieval changes; 24 sanitized retrieval checks plus 6 deterministic route cases, not live agent outcomes.",
+  "cases": [
+    {
+      "id": "p1-host",
+      "must_include": [
+        "host-map"
+      ],
+      "must_exclude": []
+    },
+    {
+      "id": "p2-git",
+      "must_include": [
+        "git-location"
+      ],
+      "must_exclude": []
+    },
+    {
+      "id": "p3-address",
+      "must_include": [
+        "address-policy"
+      ],
+      "must_exclude": []
+    },
+    {
+      "id": "p4-unity",
+      "must_include": [
+        "unity-map"
+      ],
+      "must_exclude": []
+    },
+    {
+      "id": "p5-tools",
+      "must_include": [
+        "unity-tools"
+      ],
+      "must_exclude": []
+    },
+    {
+      "id": "p6-codex",
+      "must_include": [
+        "codex-context"
+      ],
+      "must_exclude": []
+    },
+    {
+      "id": "p7-business",
+      "must_include": [
+        "business"
+      ],
+      "must_exclude": []
+    },
+    {
+      "id": "p8-cross",
+      "must_include": [
+        "shared-wsl"
+      ],
+      "must_exclude": []
+    },
+    {
+      "id": "n1-host-model",
+      "must_include": [],
+      "must_exclude": [
+        "host-map"
+      ]
+    },
+    {
+      "id": "n2-host-tts",
+      "must_include": [],
+      "must_exclude": [
+        "host-map"
+      ]
+    },
+    {
+      "id": "n3-git-model",
+      "must_include": [],
+      "must_exclude": [
+        "git-location"
+      ]
+    },
+    {
+      "id": "n4-git-codex",
+      "must_include": [],
+      "must_exclude": [
+        "git-location"
+      ]
+    },
+    {
+      "id": "n5-address-codex",
+      "must_include": [],
+      "must_exclude": [
+        "address-policy"
+      ]
+    },
+    {
+      "id": "n6-address-tts",
+      "must_include": [],
+      "must_exclude": [
+        "address-policy"
+      ]
+    },
+    {
+      "id": "n7-unity-tts",
+      "must_include": [],
+      "must_exclude": [
+        "unity-map"
+      ]
+    },
+    {
+      "id": "n8-unity-provider",
+      "must_include": [],
+      "must_exclude": [
+        "unity-map"
+      ]
+    },
+    {
+      "id": "n9-tools-latency",
+      "must_include": [],
+      "must_exclude": [
+        "unity-tools"
+      ]
+    },
+    {
+      "id": "n10-tools-model",
+      "must_include": [],
+      "must_exclude": [
+        "unity-tools"
+      ]
+    },
+    {
+      "id": "b1-superseded",
+      "must_include": [],
+      "must_exclude": [
+        "inactive"
+      ]
+    },
+    {
+      "id": "b2-candidate",
+      "must_include": [],
+      "must_exclude": [
+        "pending"
+      ]
+    },
+    {
+      "id": "b3-history",
+      "must_include": [
+        "inactive"
+      ],
+      "must_exclude": []
+    },
+    {
+      "id": "b4-role",
+      "must_include": [
+        "business"
+      ],
+      "must_exclude": []
+    },
+    {
+      "id": "b5-subject",
+      "must_include": [
+        "codex-context"
+      ],
+      "must_exclude": [
+        "business",
+        "codex-install"
+      ]
+    },
+    {
+      "id": "b6-cross-project",
+      "must_include": [
+        "shared-wsl"
+      ],
+      "must_exclude": []
+    },
+    {
+      "id": "r1-history",
+      "action": "retrieve"
+    },
+    {
+      "id": "r2-current",
+      "action": "skip"
+    },
+    {
+      "id": "r3-forbidden",
+      "action": "skip"
+    },
+    {
+      "id": "r4-worker",
+      "action": "skip"
+    },
+    {
+      "id": "r5-audit",
+      "action": "audit_readonly"
+    },
+    {
+      "id": "r6-reuse",
+      "action": "reuse_parent_hints"
+    }
+  ]
+}

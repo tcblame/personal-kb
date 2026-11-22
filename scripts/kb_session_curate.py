@@ -20,7 +20,7 @@ from typing import Any, Iterable
 
 from kb_lib import configure_utf8_streams
 from kb_sensitive_scan import redact_value
-from kb_session_identity import select_session_meta
+from kb_session_identity import filename_session_id, open_rollout, rollout_paths, select_session_meta
 
 configure_utf8_streams()
 
@@ -267,6 +267,12 @@ def _path_date(path: Path, root: Path) -> date | None:
 
 def _guess_date(path: Path, root: Path, source: str) -> date | None:
     if source == "codex":
+        stamp = re.match(r"rollout-(\d{4}-\d{2}-\d{2})", path.name)
+        if stamp:
+            try:
+                return date.fromisoformat(stamp[1])
+            except ValueError:
+                pass
         path_date = _path_date(path, root)
         if path_date:
             return path_date
@@ -466,7 +472,7 @@ def _parse_session(
     cursor_time = ""
 
     try:
-        with path.open("r", encoding="utf-8", errors="replace") as handle:
+        with open_rollout(path) as handle:
             for raw in handle:
                 line_count += 1
                 try:
@@ -629,7 +635,7 @@ def _candidate_paths(
         for root in roots:
             found_root = True
             try:
-                paths = sorted(root.rglob("*.jsonl"))
+                paths = rollout_paths(root) if current_source == "codex" else sorted(root.rglob("*.jsonl"))
             except OSError as exc:
                 errors.append(f"{current_source}:{root}: scan_failed: {exc}")
                 continue
@@ -659,7 +665,7 @@ def _candidate_paths(
     unique: list[tuple[str, Path]] = []
     seen: set[str] = set()
     for current_source, path in sorted(candidates, key=lambda item: str(item[1])):
-        key = str(path.resolve(strict=False)).lower()
+        key = (filename_session_id(path) if current_source == "codex" else "") or str(path.resolve(strict=False)).lower()
         if key in seen:
             continue
         seen.add(key)

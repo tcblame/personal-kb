@@ -8,6 +8,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from kb_session_identity import default_sessions_root, open_rollout, rollout_paths
 
 
 EXIT_RE = re.compile(r"Exit code:\s*(-?\d+)")
@@ -16,7 +17,7 @@ EXIT_RE = re.compile(r"Exit code:\s*(-?\d+)")
 def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     try:
-        with path.open("r", encoding="utf-8-sig", errors="replace") as handle:
+        with open_rollout(path) as handle:
             for line in handle:
                 if not line.strip():
                     continue
@@ -137,7 +138,7 @@ def audit_root(root: Path, since: datetime | None = None, until: datetime | None
     if not root.exists():
         return result
 
-    for path in sorted(root.rglob("*.jsonl")):
+    for path in rollout_paths(root):
         if not _within_window(path, since, until):
             continue
         rows = _load_jsonl(path)
@@ -189,7 +190,7 @@ def _parse_datetime(value: str) -> datetime | None:
 
 
 def main(argv: list[str]) -> int:
-    default_root = Path.home() / ".codex" / "sessions"
+    default_root = default_sessions_root()
     parser = argparse.ArgumentParser(description="Audit Codex JSONL sessions for real personal-kb and subagent usage.")
     parser.add_argument("--root", default=str(default_root), help="Codex sessions root")
     parser.add_argument("--since", default="", help="Filter by file modified time, ISO format")

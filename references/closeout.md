@@ -2,6 +2,68 @@
 
 Run closeout once after the parent integrates one logical task that actually retrieved, adopted, wrote, or updated KB. A task that fully skipped KB needs no closeout. Do not repeat an earlier query in a later aggregate closeout.
 
+Prefer structured input for ordinary closeout:
+
+```bash
+python3 <skill-root>/scripts/kb.py closeout --json-file <task-closeout.json> --require-complete-context
+```
+
+The JSON object separates actual result metadata from the parent's judgment:
+
+```json
+{
+  "closeout_id": "stable-task-id",
+  "session_id": "known-session-id",
+  "topic_id": "known-topic-id",
+  "retrieval_snapshot": {
+    "retrieval_id": "copy-actual-result-id",
+    "items": [
+      {"entry_id": "actual-entry-id", "kind": "issue", "freshness_state": "fresh", "trust_tier": "verified"}
+    ]
+  },
+  "adoption_effects": {"locate": [], "decide": [], "fix": [], "write": []},
+  "rejection_reasons": {"actual-entry-id": "current evidence did not support this task"},
+  "memory_review": {"disposition": "not_reusable", "reason": "no verified new reusable conclusion"}
+}
+```
+
+Copy a single actual retrieval result into `retrieval_snapshot`, including its
+original ID and items. Extra item bodies/paths are stripped. The writer derives
+linkage, candidate IDs, hit count and compact telemetry; it does not adopt or heat
+returned records. Explicit conflicting IDs/counts fail before side effects. An
+empty snapshot supplies an empty candidate set and cannot authorize adoption.
+This is caller-supplied result evidence, not an authenticated retrieval registry.
+
+For multiple calls, put every original returned object in `retrieval_snapshots`.
+Do not also supply `retrieval_snapshot`. The writer validates unique call IDs,
+derives all links, sums hit slots, unions candidate IDs, copies queries and
+compacts ranking telemetry; repeated records across calls are legitimate slots.
+Explicit conflicting counts or IDs fail before side effects. Legacy callers can
+still provide explicit `linked_retrieval_ids`, `rag_calls`, candidate IDs and
+compact `retrieval_items`. Existing quality statistics describe the first three
+supplied positions, not per-topic recall.
+
+`--require-complete-context` requires a session ID, task topic, memory assessment,
+and observed telemetry for completed retrievals. An empty observed result is
+valid. Session precedence is explicit CLI/JSON, current Codex thread/session
+environment, then one unambiguous snapshot session. A parent keeps its own
+identity when using a child scout's snapshot. A shared snapshot topic is reused;
+different topics require an explicit parent task topic. No identity is guessed
+from cwd or another rollout. This validation does not authorize writes or infer
+adoption, and the compatibility path without the flag remains supported.
+JSON `unresolved_retrieval_attempts` accepts objects with `attempt_id` and `state`
+(`pending`, `failed`, `unavailable`, `aborted`, `unknown`). Completed IDs plus
+unresolved attempts must equal `rag_calls`; they never supply confirmed hits.
+
+`memory_review` accepts `disposition` and a required `reason`, matching the CLI
+assessment states. `written`/`updated` require corresponding actual entry IDs.
+Optional `target` is `builtin_memory`, `personal_kb`, `task_writes` or `unknown`;
+optional `instruction_source` is `system`, `developer`, `user`, `task` or `unknown`.
+These fields explain a restriction and never grant write permission. Omit unknown
+details or mark them `unknown`; do not copy the controlling prompt into telemetry.
+
+The equivalent CLI remains supported:
+
 ```bash
 python3 <skill-root>/scripts/kb.py closeout \
   --closeout-id "<stable task id>" \
@@ -48,3 +110,16 @@ When a partial closeout reports `retry_safe:false` or
 `failed_side_effects_unknown:true`, do not rerun the same closeout automatically. Keep the
 partial event as the audit record and continue the user task; repair the missing entry or
 side-effect state in a separate maintenance action.
+
+Observed empty results retain `retrieval_items: []` and count as an observed
+quality row with zero slots. Missing telemetry remains unknown. Runtime audit
+reports both event rows and unique non-empty closeout IDs, plus duplicate and
+missing-ID counts. It does not deduplicate or rewrite historical events.
+
+An optional memory_gap object records a verified failure stage and a brief evidence
+pointer. Supported stages are missing_record, missed_trigger, missed_recall,
+wrong_scope, stale_fact, unused_hit, late_use and broken_evidence. Establish that
+a target record already existed before calling it missed_recall. The stats JSON
+counts reported stages by unique closeout ID. Missing feedback is unknown.
+
+When a maintained record has a confirmed `supersedes` edge, closeout derives `replacement_links` from the stored owner. The event keeps the predecessor, successor, scope and effective time for later review. A separate release document can be the evidence for such a change.

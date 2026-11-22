@@ -95,7 +95,7 @@ CONTEXT_PREFIXES = (
     "<subagent_notification>",
     "<turn_aborted>",
 )
-PARSER_VERSION = "codex-shell-v9"
+PARSER_VERSION = "codex-shell-v10"
 
 
 def log_path(base_dir: Path | None = None) -> Path:
@@ -851,6 +851,7 @@ def _parse_command_call(
     output_by_call_id: dict[str, str],
     *,
     turn_id: str = "",
+    completion_outputs: dict[tuple[str, int], str] | None = None,
 ) -> list[dict[str, Any]]:
     payload = call.get("payload") or {}
     commands, source_format = _call_commands(payload)
@@ -864,7 +865,10 @@ def _parse_command_call(
     parsed: list[dict[str, Any]] = []
     retrieval_results = session_output.retrieval_results(output)
     retrieval_result_index = 0
-    for command in commands:
+    for command_index, command in enumerate(commands):
+        command_output = (completion_outputs or {}).get((call_id, command_index), output)
+        exit_code = _parse_exit_code(command_output)
+        success = _execution_success(command_output)
         tokens = _parse_cli_tokens(command)
         script_key, invocation_kind = _detect_kb_script(command, tokens)
         if script_key and _is_help_invocation(tokens, _script_name(script_key)):
@@ -883,11 +887,18 @@ def _parse_command_call(
         }
 
         if script_key == "kb_rag_context":
+            results = session_output.retrieval_results(command_output)
+            query = _first_positional_after_script(tokens, _script_name(script_key))
+            matching = [result for result in results if result.get("query") == query]
             result = (
-                retrieval_results[retrieval_result_index]
-                if retrieval_result_index < len(retrieval_results)
-                else {}
+                matching[0] if len(matching) == 1 else
+                retrieval_results[retrieval_result_index] if retrieval_result_index < len(retrieval_results) else {}
             )
+            if not result.get("retrieval_id") and len(results) == 1:
+                result = results[0]
+            if result.get("retrieval_id"):
+                info["success"] = result.get("success", True) is True
+                info["execution_status"] = "success" if info["success"] else "failed"
             retrieval_result_index += 1
             info["query"] = _first_positional_after_script(tokens, _script_name(script_key))
             info["hit_count"] = result.get("hit_count")
@@ -902,7 +913,7 @@ def _parse_command_call(
             info["query"] = _first_positional_after_script(tokens, _script_name(script_key))
             info["hit_count"] = _parse_hit_count_from_output(output)
         elif script_key == "kb_closeout":
-            info.update(_closeout_info(tokens, output, success))
+            info.update(_closeout_info(tokens, command_output, success))
         elif script_key == "kb_add":
             info["inline_write"] = "--entry-b64" in tokens or "--json-b64" in tokens
         elif script_key == "kb_update":
@@ -1041,6 +1052,7 @@ def _parse_session(path: Path) -> dict[str, Any]:
     rows = _session_rows(path)
     metas: list[dict[str, Any]] = []
     user_messages: list[str] = []
+    response_user_messages: list[str] = []
     instruction_messages: list[str] = []
     guard_observed = False
     output_by_call_id: dict[str, str] = {}
@@ -1075,6 +1087,8 @@ def _parse_session(path: Path) -> dict[str, Any]:
         elif row_type == "response_item" and payload.get("type") == "message" and payload.get("role") in {"user", "developer"}:
             if payload.get("role") == "user":
                 instruction_text = _user_response_text(payload.get("content"))
+                if instruction_text.strip():
+                    response_user_messages.append(instruction_text)
             else:
                 instruction_text = _output_text(payload.get("content"))
             if instruction_text.strip():
@@ -1100,11 +1114,13 @@ def _parse_session(path: Path) -> dict[str, Any]:
 
     meta, rollout_id, session_meta_selection = _select_session_meta(path, metas)
     parsed_calls: list[dict[str, Any]] = []
+    completion_outputs = session_output.shell_completion_outputs(rows, calls, rollout_id)
     for call_info in calls:
         for item in _parse_command_call(
             call_info["row"],
             output_by_call_id,
             turn_id=str(call_info.get("turn_id") or ""),
+            completion_outputs=completion_outputs,
         ):
             item["sequence"] = len(parsed_calls)
             parsed_calls.append(item)
@@ -1212,6 +1228,10 @@ def _parse_session(path: Path) -> dict[str, Any]:
     closeout_pairings, unmatched_retrieval_calls = _match_retrieval_closeouts(retrieval_calls, closeout_calls)
     unmatched_retrieval_call_count = len(unmatched_retrieval_calls)
 
+    # Current desktop rollouts may contain response_item user messages only.
+    # Do not use developer instructions as a substitute for actual user intent.
+    if not user_messages:
+        user_messages = response_user_messages
     user_text = " ".join(user_messages)
     instruction_text = " ".join(instruction_messages)
     subagent = _subagent_info(meta)

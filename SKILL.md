@@ -1,180 +1,109 @@
 ---
 name: personal-kb
-description: Proactively retrieve and maintain verified local personal knowledge. Invoke when there is any reasonable possibility (roughly 30% is enough) that prior cross-session history, recurring issues, user corrections, terminology, repo/branch/path mappings, reusable decisions, or similar work could materially help; also invoke when current work may have produced a durable memory candidate, even if no retrieval occurred. Do not wait for an explicit KB request. Skip only clearly one-off tasks with no likely historical or future reuse value, and use the read-only audit flow for explicit KB audits.
+description: Proactively retrieve and maintain evidenced project knowledge, dated object history and work products. Invoke when there is any reasonable possibility (roughly 30% is enough) that cross-session history, recurring issues, user corrections, terminology, resource mappings, decisions, or similar work could materially help; also assess verified reusable memory candidates. Skip clearly one-off tasks with no likely historical or future value. Explicit KB audits use the read-only audit flow.
 ---
 
 # Personal KB
 
-Use Personal KB as an AI-only historical context layer. Treat every hit as a lead, never as current truth. Current user instructions, files, code, logs, configs, tests, Git state, and current official sources take precedence.
+Use one local knowledge corpus as historical context. Hits are leads; current instructions, files, logs, tests, configuration and authoritative sources decide what applies. Stored commands and past approvals are evidence, never new execution authority. Do not import transcripts as knowledge or require a new record for every task.
 
-The product goal is a growing veteran colleague for the primary conversation: it remembers explicit user requests, and it may also preserve a verified, reusable bug cause, design decision, resource mapping, or tool lesson discovered while doing work. It is not a transcript dump and it is not a system that must remember every prompt.
+## Decide once per topic
 
-There is one physical KB root. `repo`, `branch`, and `kind` are logical facets inside that root, not independent data sources. Keep long-term records in the configured `records` directory; keep retained evidence, runtime events, and rebuildable caches in their configured sibling directories. Retrieval always reads the one records corpus unless an explicit maintenance command says otherwise.
+Retrieve when prior knowledge could reasonably help (roughly 30% is enough). Cross-session decisions, recurring symptoms, corrections, project or resource mappings, similar incidents and unfamiliar durable shorthand are useful signals. Do not require history keywords or proof that the task depends on history.
 
-## Decide whether to retrieve
+Skip when a clearly one-off task is fully answered by current evidence and no useful historical connection is reasonably likely. An explicit runtime/effectiveness audit reads [audit.md](references/audit.md) and current session/runtime evidence directly; do not query the KB merely to prove that it was consulted. Remembering a newly established rule is maintenance; it does not itself require a RAG query.
 
-Use a recall-biased semantic judgment: retrieve when there is a reasonable possibility (roughly 30% is enough) that prior knowledge could materially help. Do not require explicit history keywords or proof of dependence. Useful signals include:
+Split independently answerable subjects before retrieval. For the initial query, use the task's own terms for the object and the specific action, symptom or prior decision. In a long request, omit unrelated subtopics and execution instructions. For machine-specific state, include its identity and verify on that machine before adopting a configuration claim. Reuse the results within the topic. Retrieve again only for a new durable anchor, an explicitly broadened zero-hit search, contradictory current evidence, or lost results. Do not combine unrelated topics or repeat a query solely to change its exit code. One topic's retrieval does not satisfy another topic's budget.
 
-- A decision, correction, project state, or unfinished direction from another session.
-- A recurring issue, term, path, repo, branch, service, or business-name mapping.
-- Similar past implementation or troubleshooting experience.
-- An explicit request to retrieve Personal KB records.
+Form an initial judgment from the task, then look up the historical decision that could change it. For a compound request use `retrieve TASK --focus QUESTION --brief` to isolate an independently answerable question. Before delivering an action with meaningful environment-specific history, use `retrieve TASK --action "operation + client or device" --brief`. These are independent intents; use only the relevant ones and reuse their results. A request to draw a diagram can need the client's rendering experience before the first delivery. Direct source checks remain appropriate for cheap one-off lookups.
 
-Also retrieve when an action depends on an unfamiliar user shorthand or ambiguous durable term whose meaning is not established by current evidence. Treat this as a possible terminology mapping; do not guess that the shorthand is an executable, path, or product name.
+Keep a named object in a focused question. If the question refers to “it”, pass the original task and its relevant name with `--scope-anchor`. For a chat preview, the delivery action includes the actual client and file-reading environment. A project with a shared creative knowledge source uses that source for picture and shot decisions; code, services, deployment and project locators use Personal KB. Split mixed requests by the decision each part needs.
 
-Skip ordinary RAG when current evidence fully answers a one-off question, a current log already determines a diagnosis, or the task is unrelated Skill/MCP maintenance. An explicit Personal KB audit or maintenance request triggers this Skill, but runtime audit should read `references/audit.md` and inspect session/runtime evidence directly; it does not require a self-referential long-term RAG query.
+For project history, resolve a stable object and use `timeline` with the requested date or previous name. Keep independently queried tickets and resources on their own records. Put the user's short name or ticket number in its owner's aliases, and check the ordinary wording after an update. When the user confirms a rename or a change of scope, append dated evidence to the same object. Keep older evidence and use the existing retain mechanism for reusable artifacts. See [domain-model.md](references/domain-model.md).
 
-When Cursor is the main client, use the read-only Cursor transcript auditor before drawing usage conclusions. Count executable Shell tool requests separately from runtime results: a transcript request without a returned tool result is `execution_status=unknown`, never a successful retrieval. Keep main sessions and subagents separate, and join a Cursor session to runtime only through one unique `closeout_id` (or an explicit matching `session_id`); do not infer adoption from command text, a Skill mention, or a nearby timestamp. The auditor is `scripts/kb_audit_cursor_sessions.py` and accepts one or more Cursor project roots plus an optional private `closeout.jsonl`.
+When the user links an earlier chat, read the referenced decision and resolve its owner. On a confirmed change, review that owner's existing Personal KB record even if release notes already cover the change. Record the predecessor, the scope, when the new decision took effect and its evidence. Keep implementation and deployment as separately dated observations. Use `retrieve --as-of YYYY-MM-DD` or the object's timeline for an earlier decision.
 
-A request to remember a newly established rule is maintenance, not by itself a reason for ordinary RAG. Verify the new rule against current evidence, then check for an existing record during the write/update flow so it is updated instead of duplicated. Retrieve first only when the requested rule also depends on an older decision, mapping, incident, or other cross-session fact.
+When a user's wording misses a verified owner, learn the short expression on that owner. Use the paired check in [retrieval.md](references/retrieval.md) with the original question, another wording and a nearby wrong subject. Keep the object's name from the conversation when a follow-up omits it. For progress ledgers and delivered files, register one searchable map to the maintained source with its date and verification boundary. Open that source when asked for current progress or the latest build.
 
-Explicit task constraints win. If a task forbids Personal KB, run no KB command. If it forbids writes but allows KB reading, use only read-only retrieval or audit commands.
+When a correction or repeat failure reveals a gap, identify where it happened. Add the verified stage and evidence pointer to the existing closeout (see [closeout.md](references/closeout.md)); use that case to test the corresponding storage, retrieval or action change. A routine success needs no extra feedback.
 
-## Configure the root and mode
+## Entry point and execution
 
-Read `config.json` (or the explicitly selected `PERSONAL_KB_CONFIG`) before writing. `storage.root` is the canonical data root; `storage.records` is the only long-term retrieval source; `storage.retained_files` stores full local evidence packages; `storage.manifests` stores their small manifests; `storage.runtime` stores closeout/challenge/effectiveness events; and `storage.cache` stores rebuildable indexes and aggregations. Each child path must remain relative to `storage.root`.
-
-The installed local config may point runtime/cache at legacy directories so existing history remains readable. A portable installation should use distinct `records`, `retained-files`, `manifests`, `runtime`, and `cache` directories. Do not create a second root to work around a routing ambiguity.
-
-Runtime mode is `normal` by default. `challenge` adds a bounded critic pass after the main conversation has verified and adopted records; it never changes the default retrieval path. Read `references/challenge.md` before enabling it.
-
-Use the stable wrapper for daily work (replace `<skill-root>` with the installed Skill directory):
+Use the installed `scripts/kb.py` wrapper. `<skill-root>` means the actual runtime installation, not an arbitrary source checkout. Consult [local-runtime.md](references/local-runtime.md) when the host provides a Windows/WSL mapping or the entry point is unclear. Use `kb.py version` (no arguments) to check the executable and selected data/config roots.
 
 ```bash
-python3 <skill-root>/scripts/kb.py retrieve "<history-dependent task>" --limit 5
-python3 <skill-root>/scripts/kb.py remember --entry-b64 <base64-json>
-python3 <skill-root>/scripts/kb.py update ...
-python3 <skill-root>/scripts/kb.py retain --path <file> --project-key <project> --case-id <case> --category <category>
-python3 <skill-root>/scripts/kb.py reference --project-key <project> --case-id <case> --reference-kind credential --locator <vault-or-resource-locator>
-python3 <skill-root>/scripts/kb.py closeout ...
+python3 <skill-root>/scripts/kb.py retrieve "<task plus concrete anchors>" --topic-id <stable-task-topic> --limit 5 --brief
+python3 <skill-root>/scripts/kb.py closeout --json-file <task-closeout.json> --require-complete-context
 ```
 
-The focused scripts remain available for maintenance and compatibility. A wrapper invocation is equivalent to its focused command for audit and effectiveness metrics.
+Use `--brief` for ordinary retrieval. It returns every selected candidate with its conclusion, applicability, warnings and an evidence pointer. Keep the returned object for closeout. When detail is needed, open the indicated evidence. Ranking audits can request the existing full `--json` format at the outset. If an authorized caller needs both views, add `--receipt-output` to the brief call to save the full result once. Retrieval itself is read-only. See [retrieval.md](references/retrieval.md).
 
-## Use one budget per topic
-
-Read this Skill once per user request. Before any retrieval, split a request containing independently answerable subjects into separate topics; one user message is not automatically one topic.
-
-For each topic:
-
-1. Decide separately whether current evidence is sufficient or cross-session history is required.
-2. Run at most one initial RAG query through the chosen retrieval owner for each history-dependent topic, using only that topic's concrete anchors.
-3. Reuse selected hints only within that topic. A retrieval for one topic never consumes or satisfies another topic's budget, even when both topics appeared in the same user message.
-4. Within the same topic, retrieve again only when the user introduces a new durable anchor, asks for broader history after a zero-hit query, current evidence contradicts the prior result, or context was lost and no selected result remains. A later independent topic starts its own budget and is not a retry.
-
-Read [runtime calls](references/runtime-calls.md) for asynchronous tool completion, unresolved attempts, and version checks. An empty first tool output is not evidence that retrieval never ran.
-
-Pass `--session-id` and `--topic-id` on retrieve and closeout when the caller has them. `topic_id` is the independent budget key; it does not prove that a hit was useful. A topic with sufficient current evidence may skip retrieval and close out with a concrete `--reason`/`skipped_reason` only when the task otherwise has no adopted or written entry.
-
-Do not combine unrelated topic anchors into one query. After all topics are integrated, run one parent closeout for the whole request and link every retrieval ID that was actually used. A request that fully skipped KB needs no closeout.
-
-## Core lifecycle
-
-1. Retrieve a small context set when historical knowledge could reasonably help.
-2. Verify useful hits against current evidence.
-3. Apply the verified current evidence, not the KB text itself.
-4. When this task used retrieval or KB maintenance, classify actual adoption once and close out; otherwise stop without a KB lifecycle event.
-5. Add or update long-term KB only for verified, stable, reusable conclusions.
-
-Retrieve with:
-
-```bash
-python3 <skill-root>/scripts/kb.py retrieve \
-  "<task plus project, module, path, config, error, table, or durable business anchor>" --limit 5 --brief
-```
+Report a historical decision in the user answer when it changes the outcome, reveals a conflict or supplies requested provenance. Routine hits, misses and telemetry belong in the tool result. When a verified record supplies a file or repository that materially directs the work, classify it as `locate` even if the current source supplies the final fact.
 
 Run retrieval from the task's working directory. Pass the actual active or mentioned project file with `--current-file PATH` when it is available. Include the user's functional description and their own wording. For `project_routing.state=use`, use the selected project for this lookup and check the pointers before applying its history. For `clarify`, show the best one to three choices, briefly explain the matching function or location, and leave room for another project or an independent topic. Ask before taking project-specific action. A choice applies to this conversation. Record a permanent name or relationship when the user states it or a source establishes it. A broad term alone can warrant an ordinary answer. When different words describe the same workflow, compare the visible file and the candidates' sources before deciding whether to ask.
 
-Windows callers can use the configured [WSL runtime mapping](references/local-runtime.md) to pass the working file to the same installed Skill.
+Use a user-established `--repo`/`--branch` when the task establishes it. An ambiguous workspace can discover candidates from the canonical corpus without an index; `--global` explicitly searches all scopes. Cross-scope results retain their historical conclusion and evidence pointers with an applicability warning, so verify the target project rather than treating the returned scope as current authority.
 
-Default retrieval is read-only. Do not update search counts, rebuild indexes, refresh aggregations, or include non-current records during ordinary work. Use `kb_search.py` only for full-record inspection, recall debugging, migration, normalization, or explicit corpus audit.
+Preserve the complete tool result `{output, session_id, exit_code}`. Wait on the original process until completion; an empty first output or outer `Script completed` does not prove the shell finished. Recover an existing process or receipt before retrying. Read [runtime-calls.md](references/runtime-calls.md) for asynchronous recovery and unresolved attempts.
 
-For project knowledge with stable identity or scoped changes, read
-[domain model and project retrieval](references/domain-model.md). Optional
-`domain` metadata and evidenced relationships use the existing records and
-`remember/update`; no separate writable project encyclopedia is created.
-`retrieve` can resolve a project and supplement lexical results with bounded
-one-hop relationships. `project` adds a bounded current view using the same
-retrieval ID. Ambiguous projects, candidate relations, and unknown scopes do
-not become current facts. Register only verified identities and rebuild the
-derived index explicitly with `project-index` after a batch of domain updates.
-Legacy records remain usable without bulk migration.
+An expected `unavailable` result is a completed attempt, not permission to repeat the query. Use `--best-effort` on the initial call when desired. Parameter errors, corruption and internal errors remain actionable failures. A receipt failure preserves the returned result and retrieval ID: reuse them without another retrieval.
 
-## Apply decisions without redoing them
+## Verify, then apply
 
-When a hit represents a user-confirmed `requirement` or `decision_confirmed` record:
+Open only the evidence needed by this task. A matching snapshot hash establishes local bytes, not current remote state, runtime health or applicability. `fresh` and `runtime_recent` remain scoped evidence; `needs_recheck` and legacy hits require current verification. Reject blocked or unrelated hits. A correct record can still be irrelevant to this query.
 
-1. Check whether the current user message replaces it.
-2. Open its current source or Canonical file and verify that it still agrees.
-3. If it agrees, state that the choice is already settled and execute it; do not restart full option analysis or dispatch broad comparison agents.
-4. If the record is fresh and materially selects the route, classify it as `used-decide`. If it only located the current authority, classify it as `used-locate`.
-5. If current evidence disagrees, follow current evidence and update or supersede the stale record during explicit maintenance.
+For a user-confirmed requirement or decision, check the current instruction and authority first. If they still agree, apply the settled decision without restarting the comparison. If they conflict, use current evidence and assess a correction under the write rules below. Do not promote a past address, tool registration or deployment claim to a current runtime fact.
 
-## Classify adoption
+Keep the normal context small. Search deep records only for recall debugging, migration, explicit corpus audit or necessary full-record inspection. Ranking, bounded expansion, evidence checks and diversity rules are documented in [retrieval.md](references/retrieval.md).
 
-Search hits are not automatically adopted. Classify only records that materially affected the completed task:
+## Parent ownership and adoption
 
-- `--used-locate`: located current evidence; record without heat.
-- `--used-decide`: changed or replayed a verified decision; heat.
-- `--used-fix`: changed diagnosis or repair; heat.
-- `--used-write`: materially supported final content; heat.
+Default to one agent. The parent owns adoption, heating, durable writes and one aggregate closeout. Ordinary workers consume parent-verified hints and report historical gaps; they do not run KB scripts. If an authorized task needs delegation, read [subagents.md](references/subagents.md) before dispatch. Broader retrieval may use one explicitly authorized read-only KB scout; do not create extra agents merely because history was mentioned.
 
-Do not use legacy unclassified `--used` in the recommended flow. Do not heat records that were merely read. Session brief IDs are short-term context and must never enter long-term heat.
+Only classify records that materially affected the task:
 
-When this task retrieved or maintained KB, run closeout once after the parent integrates results. Explicitly mark `--session-brief-hit` / `--session-brief-help` when a recent brief was consulted or helped; missing telemetry must be reported as `telemetry_missing`, not as a false/zero result. Routine write/closeout success is silent. Read `references/closeout.md` for fields, brief retention, compatibility, or telemetry debugging.
+- `locate`: found current authority; record adoption without heat.
+- `decide`: changed or replayed a verified decision; heat.
+- `fix`: changed diagnosis or repair; heat.
+- `write`: materially supported the delivered content; heat.
 
-## Write durable knowledge
+Use `adoption_effects` in JSON or matching `--used-*` flags. Reading or returning a record is not adoption. Legacy unclassified `--used` is for compatibility. Recent session briefs are short-term context and never receive long-term heat.
 
-Write or update only a verified reusable root cause/fix, mapping, requirement, decision, pitfall, or implementation pattern. The primary record stores a concise conclusion, `asset_id` values, and relative evidence pointers; it does not embed large file bodies. Prefer updating or superseding an existing record over adding a duplicate.
+## One truthful closeout
 
-Full project evidence may be retained locally under `retained-files` when the user asks for complete archival: source files, logs, screenshots, database samples, schema/DDL, internal addresses, MCP/SSH resource material, active credentials, tokens, and private keys are all allowed there. Preserve the source bytes verbatim unless the user explicitly requests transformation. The archive is a plaintext copy by default; the original may also remain, so never describe retention as encryption, password protection, or secure deletion. The command applies best-effort owner-only permissions on POSIX, but this is not an isolation boundary. Manifests may contain absolute origin/stored paths locally; public export excludes the real manifests and data root.
+After integrating all topics, close out once if this task actually retrieved or maintained KB data. Tasks that fully skipped KB need no lifecycle event. Link every actual retrieval handled by this closeout; do not re-include already closed queries or invent IDs. Use a stable closeout ID. A successful write is silent; inspect `retry_safe` on partial failure before any retry.
 
-Keep the durable `kb.jsonl` row concise: record the conclusion, opaque `asset_id`, and relative evidence pointer instead of duplicating secret values or large bodies into the retrieval index. Use `reference` only when the material already lives in an external vault, credential store, or resource system; use `retain` when the actual bytes must be archived. The first version intentionally has no password prompt or vault abstraction.
+Use `--json-file ... --require-complete-context` for normal authorized closeout. Pass the actual returned object as `retrieval_snapshot`, or all actual results as `retrieval_snapshots`; linkage, counts, compact telemetry and available identity are derived without adopting hits. Include the parent's memory assessment and stable task topic. Missing context fails before writes; legacy callers remain compatible without the flag. Read [closeout.md](references/closeout.md) for the template, multi-call handling and failure semantics.
 
-For MySQL, retain requested schema, relations, field meaning, DDL, samples, connection material, and source exports verbatim in local evidence. For SSH/MCP, retain requested resource files, purpose, invocation method, local mapping, and connection material. Put reusable non-secret conclusions in the durable row and point to the full local asset for exact details.
+Record known rejection IDs/reasons, misses, and compact ranking telemetry when available. An observed empty result is `retrieval_items: []`; omitted telemetry is unknown. Never fill old events with guessed quality data. Mark recent brief hit/help only when actually observed. Classify memory candidates separately; an assessment is not a durable write.
 
-Read `references/record-schema.md` before adding, updating, superseding, importing, or refreshing evidence.
+## Assess durable knowledge and permissions
 
-## Parent and subagent boundary
+Assess a verified reusable cause/fix, mapping, requirement, decision or pitfall when it arises, even without retrieval. Skip guesses, temporary state, failed attempts and raw conversation dumps. Before remember/update, check the current authorization for the actual destination:
 
-The parent decides whether retrieval is needed and chooses its executor. Run a narrow, single-anchor, single-pass retrieval directly in the parent, including one concrete similar incident from another project. Use one dedicated read-only KB scout when retrieval explicitly spans multiple projects or multiple historical stages, follows a zero-hit expansion, requires deduplication or conflict analysis, produces a large candidate set, or must serve multiple downstream workers. Do not infer broad scope merely from words such as `history` or `another project`; the parent must identify a broad routing reason.
+A changed user requirement or a verified correction calls for reviewing the matching existing record even when retrieval returned zero hits or did not help implementation. Keep still-valid parts, date the changed scope and retain historical meaning. With authorization, update using the current revision; otherwise report the specific correction candidate in the deliverable. Zero hits or zero adoption do not establish `not_reusable`.
 
-The parent owns final hint selection, adoption, heating, writes, and closeout. Pass only selected hints to ordinary workers and require current-evidence verification. Ordinary workers must not run Personal KB scripts. If a worker discovers a new history anchor or insufficient/conflicting hints, it asks the parent for a KB follow-up instead of retrieving directly.
+- Built-in memory, Personal KB records, runtime logs and ordinary delivery documents are distinct targets. Saving a requested report does not itself authorize durable memory.
+- Follow the scope of the controlling instruction. An explicit-only memory rule requires an explicit request; do not reinterpret an unspecified memory prohibition as permission for Personal KB. If scope is unresolved, retain a candidate in the authorized deliverable and use `pending_verification` or `blocked_by_instruction` for the assessment, with unknown metadata left explicit.
+- An explicit read-only task permits only read-only retrieval/audit. It does not authorize heat, closeout, receipts, retention or persistent indexes unless the user separately permits that target.
+- A Skill instruction to evaluate candidates never overrides a higher-priority restriction. Proactive remember/update applies only when current instructions permit that destination. Record the restriction target/source when known; do not guess its source.
 
-Before dispatching an ordinary worker whose assigned topic depends on history, the parent must finish that topic's retrieval, verify candidates against current authoritative evidence, and pass 1-3 verified topic-relevant hints. Each hint names the authority checked and the verification result. Hints or retrievals from a sibling topic do not satisfy this requirement. If no candidate can be verified, pass no hint and state the history gap; a current-evidence-only worker also receives no KB hint.
+For an authorized write, read the actual `config.json` and [record-schema.md](references/record-schema.md), check current evidence and duplicates, then update an existing record or add a concise new one. Use expected revisions for concurrent updates. Record IDs as written/updated only after success. Do not change a record merely because it was rejected often.
 
-Read `references/subagents.md` before dispatching workers or a KB scout.
+There is one physical `storage.root`; `storage.records` contains the durable retrieval corpus. Repo, branch and kind are logical facets. Retained files, manifests, runtime and cache are separate configured child paths; never create another root to repair routing. Indexes and project views are rebuildable, not independent facts.
 
-## Normal and challenge lifecycle
+## Read details only for the selected operation
 
-In `normal`, the primary conversation owns retrieval, current-evidence verification, adoption classification, durable writes, and one final closeout. It may proactively remember a stable, verified reusable lesson without waiting for the user to say “remember this”; temporary observations and unverified guesses stay out.
-
-In `challenge`, risk terms trigger a critic immediately; ordinary successful tasks are sampled deterministically at the configured rate (default 10%). The critic receives at most three records actually adopted this turn and produces a proposal only. It cannot write or heat the KB, run closeout, recurse, or silently alter the main result. The primary conversation verifies or rejects the proposal and performs any resulting update itself. Record error types such as `record_error`, `retrieval_error`, `scope_error`, `application_error`, `evidence_error`, or `outcome_unknown`, including why the error occurred.
-
-A non-forced challenge must prove each candidate through a material runtime adoption event (`decide`, `fix`, `write`, or legacy heat) from the declared session; a search hit or locate-only event is not eligible. A proposal must reference the queued brief and include current evidence, a proposed action, and the failure explanation before it can be resolved.
-
-Challenge is an audit cost multiplier, not a second memory source. It exists to expose stale conclusions and explain failures; it must not turn every successful task into a token-heavy debate.
-
-## Runtime output contract
-
-- Retrieval and search commands return their requested context on stdout; this data output is expected.
-- Successful write, update, closeout, and maintenance operations default to no stdout or stderr.
-- `--verbose`: one minimal structured summary.
-- `--debug`: routing reasons, candidate repos, failure IDs, and full events.
-- Safe workspace-parent fallback: silent, with internal routing metadata.
-- Parameter, unsafe-routing, corruption, lock, and write failures: concise actionable stderr plus non-zero exit.
-
-An explicit repo or branch override must take precedence over repository discovery.
-
-## Read details only when needed
-
-- `references/closeout.md`: adoption, closeout, session brief, and telemetry fields.
-- `references/record-schema.md`: durable add/update/supersede/evidence rules.
-- `references/subagents.md`: exact worker and KB-scout prompt contracts.
-- `references/audit.md`: runtime effectiveness, Codex session audit, and metric semantics.
-- `references/maintenance.md`: archive, migrate, normalize, rebuild, sensitive scan, and Git boundaries.
-- `references/validation.md`: required checks after changing Skill, scripts, routing, lifecycle, or KB data.
-- `references/retrieval.md`: configured paths, wrapper commands, evidence pointers, and retrieval output boundaries.
-- `references/challenge.md`: normal/challenge triggers, proposal-only critic contract, and error taxonomy.
-
-Keep routine work on retrieve, verify, apply, classified closeout, and durable write. Do not load audit or maintenance details during ordinary project work.
+| Operation | Reference |
+|---|---|
+| Installation entry, local mappings | [local-runtime.md](references/local-runtime.md) |
+| Retrieval, ranking, receipts | [retrieval.md](references/retrieval.md) |
+| Structured closeout, brief, telemetry | [closeout.md](references/closeout.md) |
+| Async result, unresolved attempt, identity | [runtime-calls.md](references/runtime-calls.md) |
+| Durable add/update, schema and evidence | [record-schema.md](references/record-schema.md) |
+| Stable project identity, relations, scoped replacement | [domain-model.md](references/domain-model.md) |
+| Explicit audit or Cursor transcript audit | [audit.md](references/audit.md), [cursor-audit.md](references/cursor-audit.md) |
+| Date-range curation, archive, retention, backup, release | [maintenance.md](references/maintenance.md) |
+| Authorized worker/scout handoff | [subagents.md](references/subagents.md) |
+| Explicit challenge mode (default is normal) | [challenge.md](references/challenge.md) |
+| Changed instructions, code or records | [validation.md](references/validation.md) |

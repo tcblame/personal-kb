@@ -1,0 +1,164 @@
+{
+  "pairs": [
+    {
+      "round": 1,
+      "stage": "stage-a",
+      "ms": 8967.033,
+      "git_calls": 128,
+      "fact_guard_ms": 0
+    },
+    {
+      "round": 1,
+      "stage": "stage-b",
+      "ms": 7048.11,
+      "git_calls": 114,
+      "fact_guard_ms": 720.033
+    },
+    {
+      "round": 2,
+      "stage": "stage-b",
+      "ms": 10792.812,
+      "git_calls": 114,
+      "fact_guard_ms": 1058.417
+    },
+    {
+      "round": 2,
+      "stage": "stage-a",
+      "ms": 9640.818,
+      "git_calls": 128,
+      "fact_guard_ms": 0
+    },
+    {
+      "round": 3,
+      "stage": "stage-a",
+      "ms": 8637.023,
+      "git_calls": 128,
+      "fact_guard_ms": 0
+    },
+    {
+      "round": 3,
+      "stage": "stage-b",
+      "ms": 8520.804,
+      "git_calls": 114,
+      "fact_guard_ms": 940.482
+    }
+  ],
+  "candidate": {
+    "stage": "candidate",
+    "ms": 3689.924,
+    "git_calls": 61,
+    "hits": 0,
+    "counters": {
+      "evidence.entry_cache_misses": 1,
+      "evidence.git_fact_cache_hits": 4,
+      "evidence.git_fact_cache_misses": 4,
+      "evidence.snapshots_checked": 3,
+      "retrieve.raw_candidate_visits": 26,
+      "retrieve.rejected_subject": 26
+    }
+  },
+  "production_unchanged": true,
+  "same_result_for_performance_change": true,
+  "medians_ms": {
+    "stage-a": 8967.033,
+    "stage-b": 8520.804
+  },
+  "ranges_ms": {
+    "stage-a": [
+      8637.023,
+      9640.818
+    ],
+    "stage-b": [
+      7048.11,
+      10792.812
+    ]
+  },
+  "schema": "personal-kb.latency-evaluation/v1",
+  "date": "2026-10-21",
+  "baseline_commit": "64d22df",
+  "case": "assistant-context-cost",
+  "measurement_boundary": "Python wrapper after dispatch; excludes WSL/Python startup; inclusive stages",
+  "sample_limit": "Three alternating pairs; not a general speedup claim; candidate result intentionally changes",
+  "subject_cases": [
+    {
+      "case": "assistant_context",
+      "baseline": [
+        "business",
+        "codex",
+        "shared"
+      ],
+      "candidate": [
+        "codex",
+        "shared"
+      ]
+    },
+    {
+      "case": "business",
+      "baseline": [
+        "business",
+        "codex"
+      ],
+      "candidate": [
+        "business",
+        "codex"
+      ]
+    },
+    {
+      "case": "cross_project",
+      "baseline": [
+        "wsl"
+      ],
+      "candidate": [
+        "wsl"
+      ]
+    },
+    {
+      "case": "execution_role",
+      "baseline": [
+        "business",
+        "codex"
+      ],
+      "candidate": [
+        "business",
+        "codex"
+      ]
+    },
+    {
+      "case": "multi_topic",
+      "baseline": [
+        "business",
+        "codex"
+      ],
+      "candidate": [
+        "business",
+        "codex"
+      ]
+    },
+    {
+      "case": "unspecified",
+      "baseline": [
+        "business",
+        "codex"
+      ],
+      "candidate": [
+        "business",
+        "codex"
+      ]
+    }
+  ],
+  "correctness_tests": {
+    "optimization_cases": 24,
+    "timing_cases": 8,
+    "existing_suites": 12,
+    "production_guard": "SHA-256, size, mtime unchanged"
+  },
+  "deployment": {
+    "runtime": "canonical WSL",
+    "code_sha256": "2220b25dd267d418977b67ef12762af9c908bfec6e10f44d8570f1c3aa35b418",
+    "portable_code_sha256": "0b694d1f15435d9077d2741314ba1a49432f8f794c2e71424bf073ad6b41dd7e",
+    "backup_created": true,
+    "installed_optimization_tests": 24,
+    "installed_timing_tests": 8,
+    "production_unchanged": true
+  }
+}
