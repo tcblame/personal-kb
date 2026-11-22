@@ -13,7 +13,7 @@ not a global superseded status. Legacy records do not require migration.
 Every durable record needs:
 
 - A short stable title and concise reusable conclusion.
-- 2-8 aliases and 3-15 trigger terms.
+- Start with 2–8 aliases and 3–15 trigger terms. A maintained record can add vocabulary through `learn-alias`. Each distinct saved positive question permits one additional slot per field. Phrases beyond the initial vocabulary must occur in the positive examples, and the owner keeps negative controls for replay.
 - At least one current evidence pointer.
 - The durable row contains a concise conclusion and evidence pointers, not a large file body.
 - Active passwords, tokens, private keys, and connection secrets may be preserved verbatim in a retained local file, but are referenced by `asset_id` rather than duplicated into the retrieval row.

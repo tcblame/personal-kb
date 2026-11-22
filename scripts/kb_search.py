@@ -718,7 +718,7 @@ def _search_once(
                     extra_kb_files.append(kb_file)
 
             # 限制最多扩展 8 个桶，避免性能问题
-            extra_kb_files = extra_kb_files[:8]
+            extra_kb_files = sorted(extra_kb_files)[:8]
 
             if extra_kb_files:
                 sys.stderr.write(
@@ -746,6 +746,31 @@ def _search_once(
             raise
         except Exception:
             pass  # 索引扩展失败不影响正常搜索
+
+    # A missing optional index must not make an ambiguous workspace look like
+    # an empty corpus. Discover candidates from the canonical records only;
+    # this is read-only and the RAG layer still checks topic and applicability.
+    if query and not ctx.kb_path.exists():
+        base = kb_base_dir()
+        for kb_file in sorted(base.rglob("kb.jsonl")):
+            for e in _iter_jsonl(kb_file):
+                if e.get("_deleted") or e.get("_archived"):
+                    continue
+                if allowed_kinds and e.get("kind") not in allowed_kinds:
+                    continue
+                if not _matches_tags(e, required_tags):
+                    continue
+                if not _matches_query(e, query, expanded_terms, args.match_mode, query_words_groups):
+                    continue
+                if recent_cutoff:
+                    entry_ts = _ts_key(e)
+                    if entry_ts == 0.0 or datetime.fromtimestamp(entry_ts) < recent_cutoff:
+                        continue
+                e["source"] = "workspace_discovery"
+                e["bucket_path"] = str(kb_file.parent)
+                entry_id = e.get("id")
+                if entry_id and entry_id not in seen_ids:
+                    seen_ids[entry_id] = e
 
     filtered = list(seen_ids.values())
     if query:

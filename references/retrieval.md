@@ -36,9 +36,57 @@ The audit parser treats these wrappers as the corresponding focused calls, so mi
 
 The RAG result is a small historical hint: `retrieval_id`, `entry_id`, `kind`, title, score/confidence, freshness, applicability, summary, and source pointers. It must not include a large retained-file body by default. The caller opens a relative pointer or asks an explicit evidence command when the current task needs details.
 
+Ordinary callers request `--brief` for compact JSON. It preserves the query, session/topic, ordered candidate IDs, closeout telemetry fields, conclusions, warnings, domain applicability and one source pointer per hit when available. Errors, including a failed optional receipt, retain their full recovery payload and exit semantics. The existing `--json` format includes ranking diagnostics. Both views work as a closeout snapshot. For same-call diagnostic expansion, when a file output is authorized use `--brief --receipt-output <new-path>` and read the selected item from that complete receipt by entry ID. Without a receipt, follow the evidence pointer. No automatic persistent cache is needed.
+
 Never treat a hit as current truth. Verify it against current files, logs, tests, Git state, the live schema, or the user's current instruction. A stale or conflicting hit remains useful as a lead for a challenge proposal, not as authority.
 
 ## Precision and ranking
+
+With `--focus` or `--action`, a repeatable `--scope-anchor` can carry the
+specific device, character, or ticket named in the original task into the
+selected question. Use it when the shorter question omits that object. Other
+topics in the task stay out of the search. An anchor absent from both texts is
+an invalid request. The result's `query` is the wording actually searched.
+
+Global and foreign-scope RAG hits retain a compact conclusion and source paths,
+marked `cross_project_review`. They are evidence leads, never implicit promotion
+to the current project. Missing workspace buckets use read-only canonical-record
+discovery even when the optional inverted index is absent; no index is rebuilt.
+The legacy `search` formatter's transferable-only view is not the RAG contract.
+
+Long diagnostic queries require two descriptive task anchors or an exact code
+identifier before evidence verification. A repository component or a path alone
+cannot provide that evidence. Short lookups and explicit locator queries keep
+their recall behavior; `--include-weak` deliberately bypasses the topic gate.
+Queries with six or more concrete anchors require three matches, so a product
+name plus a generic symptom does not admit a different mechanism. An exact
+informative stored phrase remains a recall path; this lexical gate is not a
+semantic relevance guarantee.
+Locator wording allows evidence paths to supply anchors, but no longer skips
+the task-topic gate. Merely mentioning a path in a long diagnostic query does
+not authorize unrelated configuration results. Short and exact file lookups
+retain their recall paths.
+
+For maps and standing requirements, a query with at least three concrete
+original anchors must match two descriptive task anchors, or an exact code/path
+identifier. A resource name alone must not admit unrelated configuration or
+tool-policy records. Source paths and planner-added terms do not satisfy this
+topic check. Explicit material/path/mapping lookup, short lookups and incident/implementation records keep their
+existing recall rules; `--include-weak` remains the explicit diagnostic escape.
+
+Repository basenames and path components cannot satisfy the exact-identifier shortcut on a multi-anchor query. In a Chinese query, two distinct short curated triggers appearing in the same record title or alias can jointly establish a topic. A literal compound notation or qualified identifier in the record's triggers can also supply an original anchor. These routes still pass the normal scope, eligibility and freshness checks.
+
+When Codex, Claude, or Gemini is the query subject, its name remains an anchor.
+Default candidate filtering requires a matching topic as well; a product name
+alone, or only generic overlaps such as `token` and conversation, must not admit
+an unrelated record. A tool named as an execution role (for example, asking it
+to inspect a business system) does not impose a product-topic boundary.
+Descriptive fields and informative stored aliases can establish topical relevance
+for cross-project experience without requiring the literal product name.
+Explicit `--include-weak` permits broader diagnostic inspection. These are
+candidate rules for records. A scope anchor binds a caller-selected object to
+the effective query and its receipt. With a focus or action it can carry a
+name explicitly present in the full task.
 
 The default RAG executor (`kb_rag_context.py`) uses a bounded two-stage search:
 
@@ -89,3 +137,9 @@ When the user requests complete project evidence, use `retain` with the default 
 `retain` accepts any regular project file, including `.env`, database connection files, active credentials, tokens, and private keys, and preserves its bytes verbatim. The local copy is plaintext; POSIX owner-only modes are best-effort hardening, not encryption or Agent isolation. Keep this data root private and never point the public exporter at it.
 
 Use `reference` instead when the material already lives in a vault, credential store, or external resource system. `--locator` remains a locator field rather than a place to paste content. This version has no password prompt or built-in vault.
+
+## Learning a user's wording
+
+After checking the owner's evidence, run `kb.py learn-alias ENTRY --alias PHRASE --positive QUESTION --negative NEARBY_QUESTION --apply` from its project. Repeat the positive option for a differently worded question. The command compares the same questions before and after on a private copy of the current corpus. It publishes the alias and its bounded checks on the existing owner only when at least one case improves, every positive ranks first and every negative excludes the owner. Later alias changes replay earlier checks on that owner. A new record starts with up to eight aliases and fifteen triggers. A long-lived owner can grow past those initial counts with additional phrases grounded in its saved positive questions and a negative control. Batch limits apply to the new proposals; earlier questions stay in the replay. Omitting `--apply` previews the comparison. A failed case can indicate the wrong project, missing evidence or missing context. Investigate that cause before changing wording further.
+
+If the user separates a short object name and an action in the sentence, optional repeated `--trigger` values can corroborate their shared alias. Keep a negative question that uses the same action on a different object. For a linked conversation, put its original chat URI or resume ID in the focused query. A verified record citing that exact thread includes its link under `related_via`.

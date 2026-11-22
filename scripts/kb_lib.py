@@ -16,7 +16,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import kb_git_reads
 from kb_kinds import DEFAULT_KIND, VALID_KINDS
+from kb_timing import git_span, span, timed
 
 
 class JsonlSafetyError(RuntimeError):
@@ -174,25 +176,27 @@ def find_entry(entries: list[dict[str, Any]], entry_id: str) -> int | None:
 
 
 def _run_git(args: list[str], cwd: Path) -> tuple[int, str, str]:
-    proc = subprocess.run(
-        ["git", *args],
-        cwd=str(cwd),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+    with git_span(args, cwd=cwd):
+        proc = subprocess.run(
+            ["git", *args],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
     return proc.returncode, (proc.stdout or "").strip(), (proc.stderr or "").strip()
 
 
 def _repo_root(cwd: Path) -> Path | None:
-    code, out, _ = _run_git(["rev-parse", "--show-toplevel"], cwd=cwd)
-    if code != 0 or not out:
-        return None
-    return Path(out)
+    return kb_git_reads.repository_root(cwd, lambda: _run_git(["rev-parse", "--show-toplevel"], cwd=cwd))
 
 
 def _current_branch(cwd: Path) -> str | None:
+    return kb_git_reads.branch_name(cwd, lambda: _read_branch(cwd))
+
+
+def _read_branch(cwd: Path) -> str | None:
     code, out, _ = _run_git(["branch", "--show-current"], cwd=cwd)
     if code == 0 and out:
         return out
@@ -630,6 +634,7 @@ def expand_query(query: str, synonyms: dict[str, list[str]] | None = None) -> li
     return terms
 
 
+@timed("context.resolve")
 def resolve_context(
     cwd: str | Path | None = None,
     *,
@@ -655,6 +660,26 @@ def resolve_context(
     cwd_path = Path(cwd) if cwd else Path.cwd()
     workspace_dir = str(cwd_path.resolve())  # 强制记录绝对路径
     config = load_config()
+
+    # A verified checkout path is another spelling of the current project's
+    # bucket. Relative hierarchical bucket IDs keep their existing meaning.
+    if repo_name_override and Path(repo_name_override).is_absolute():
+        supplied = Path(repo_name_override)
+        checkout = _repo_root(supplied) if supplied.is_dir() else None
+        if checkout and checkout.samefile(supplied):
+            caller_root = _repo_root(cwd_path)
+            canonical = _safe_dir_name(checkout.name, fallback="unknown-repo").lower()
+            branch = branch_override or _current_branch(checkout)
+            known = kb_base_dir() / canonical / _safe_dir_name(branch or "", fallback="unknown-branch") / "kb.jsonl"
+            # A matching basename alone is insufficient from a different cwd.
+            owners = {Path(r["workspace_dir"]) for r in read_jsonl(known)
+                      if not r.get("_deleted") and r.get("workspace_dir")} if known.is_file() else set()
+            if (caller_root and caller_root.samefile(checkout)) or (owners and all(
+                owner.is_dir() and (owner.samefile(checkout) or checkout in owner.resolve().parents)
+                for owner in owners
+            )):
+                repo_name_override = canonical
+                branch_override = branch
 
     # 1. 先检查当前目录是否有 git 仓库
     repo_root = None if repo_name_override and branch_override else _repo_root(cwd_path)
@@ -805,6 +830,9 @@ def _git_path_is_unmerged(path: Path) -> bool:
         relative = path.resolve().relative_to(repo_root.resolve())
     except ValueError:
         return False
+    result = kb_git_reads.unmerged(repo_root, relative)
+    if result is not None:
+        return result
     code, out, _ = _run_git(["ls-files", "-u", "--", relative.as_posix()], cwd=repo_root)
     return code == 0 and bool(out)
 
@@ -843,33 +871,38 @@ def bucket_lock(path: Path):
         if sys.platform == "win32" and lock_path.stat().st_size == 0:
             lock_file.write(b"\0")
             lock_file.flush()
-        _acquire_file_lock(lock_file)
+        with span("storage.lock_wait"):
+            _acquire_file_lock(lock_file)
         try:
             yield
         finally:
             _release_file_lock(lock_file)
 
 
+@timed("storage.append")
 def append_jsonl(path: Path, obj: dict[str, Any], *, lock_held: bool = False) -> None:
     """原子性追加一条 JSONL 记录，使用 O_APPEND 保证并发安全"""
     lock_context = nullcontext() if lock_held else bucket_lock(path)
     with lock_context:
         path.parent.mkdir(parents=True, exist_ok=True)
-        ensure_jsonl_safe(path)
+        with span("storage.safety_check"):
+            ensure_jsonl_safe(path)
         line = json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
         line_bytes = (line + "\n").encode("utf-8")
 
         # O_APPEND 保证单行写入原子性；固定 bucket lock 与重写事务协调。
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
-        try:
-            os.write(fd, line_bytes)
-        finally:
-            os.close(fd)
+        with span("storage.write"):
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+            try:
+                os.write(fd, line_bytes)
+            finally:
+                os.close(fd)
 
     # 写入后更新时间索引（如果条目有 ID）
     entry_id = obj.get("id")
     if entry_id:
-        _update_time_index_for_entry(entry_id)
+        with span("storage.index_hook"):
+            _update_time_index_for_entry(entry_id)
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:

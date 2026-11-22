@@ -92,6 +92,71 @@ class DomainTests(unittest.TestCase):
     def ids(self, payload):
         return {e["domain"]["entity_id"] for e in payload["items"] if e.get("domain")}
 
+    def test_dated_observations_through_daily_commands(self):
+        device = self.row("device:one", "device", "map")
+        self.save(device)
+        # Retain an actual byte stream and prove that an append can resolve it.
+        source = self.base / "inventory.txt"
+        source.write_text("old then new", encoding="utf-8")
+        code, out, err = self.call("retain", "--path", str(source), "--project-key", "test",
+                                   "--case-id", "inventory-261018", "--category", "logs", "--reason", "fixture")
+        self.assertEqual(code, 0, err)
+        asset = json.loads(out)
+        ref = {"type": "retained", "value": asset["asset_id"], "path": "logs/inventory.txt"}
+        def event(day, field, value, state="confirmed"):
+            return dict(date=day, field=field, value=value, state=state, basis="observed", evidence_refs=[ref])
+        old = event("2026-10", "name", "Old unit")
+        new = event("2026-11-06", "name", "New unit")
+        version = event("2026-11-15", "service:api", "v2")
+        file = self.base / "observations.json"
+        file.write_text(json.dumps([new, old, version, event("2026-11-07", "name", "maybe", "candidate")]))
+        args = ("update", device["id"], "--observation-file", str(file), "--repo", "backend", "--branch", "main")
+        code, out, err = self.call(*args, "--expected-rev", device["record_rev"])
+        self.assertEqual(code, 0, err or out)
+        self.assertNotEqual(self.call(*args, "--expected-rev", device["record_rev"])[0], 0)
+        self.assertEqual(self.call(*args)[0], 0)
+        def lookup(name, *options):
+            code, out, err = self.call("timeline", name, "--project-id", "p", *options)
+            self.assertEqual(code, 0, err)
+            return json.loads(out)
+        self.assertEqual(lookup("Old unit", "--as-of", "2026-11-10")["fields"][0]["observations"], [new])
+        self.assertEqual(lookup("New unit", "--as-of", "2026-10-31")["fields"][0]["observations"], [old])
+        self.assertEqual(lookup("Old unit", "--as-of", "2026-10-04")["fields"][0]["status"], "uncertain")
+        self.assertEqual(lookup("New unit", "--history")["total"], 4)
+        self.assertEqual(lookup("Old unit", "--as-of", "2026-09-30")["fields"], [])
+        self.assertIn("device:one", self.ids(self.query("灯塔系统 Old unit")))
+        self.assertFalse(lookup("New unit", "--verify-assets")["asset_errors"])
+        self.assertEqual(lookup("maybe")["status"], "not_found")
+        self.save(self.row("device:other", "device", "map", aliases=["Old unit", "other unit"]))
+        self.assertEqual(lookup("Old unit")["status"], "ambiguous")
+        Path(asset["stored_path"]).write_text("modified")
+        self.assertEqual(lookup("New unit", "--verify-assets")["status"], "needs_review")
+        file.write_text(json.dumps(event("2026-11-18", "service:api", "v3")))
+        self.assertNotEqual(self.call(*args)[0], 0)
+        self.assertEqual(lookup("New unit", "--history")["total"], 4)
+
+    def test_withdrawn_fact_and_same_day_deployments(self):
+        device = self.row("server", "device", "map")
+        self.save(device)
+        pointer = [{"type": "conversation", "value": "fixture transcript, verified inventory"}]
+        wrong = dict(field="name", value="mistaken", date="2026-11-16", state="confirmed",
+                     basis="observed", evidence_refs=pointer)
+        import kb_timeline
+        events = [wrong, dict(wrong, withdraws=kb_timeline.event_id(wrong)),
+                  dict(wrong, value="box", date="2026-11-16T16:01:00+08:00"),
+                  dict(wrong, value="unit", date="2026-11-16T16:53:47+08:00")]
+        facts = self.base / "correction.json"
+        facts.write_text(json.dumps(events))
+        code, out, err = self.call("update", device["id"], "--observation-file", str(facts))
+        self.assertEqual(code, 0, err or out)
+        def lookup(name, stamp):
+            code, out, err = self.call("timeline", name, "--project-id", "p", "--as-of", stamp)
+            self.assertEqual(code, 0, err)
+            return json.loads(out)
+        self.assertEqual(lookup("mistaken", "2026-11-17")["status"], "not_found")
+        self.assertEqual(lookup("unit", "2026-11-16T16:30:00+08:00")["fields"][0]["observations"][0]["value"], "box")
+        self.assertEqual(lookup("box", "2026-11-16")["fields"][0]["observations"][0]["value"], "unit")
+
     def test_legacy_records_still_validate(self):
         old = copy.deepcopy(self.project)
         old.pop("domain")
@@ -178,6 +243,46 @@ class DomainTests(unittest.TestCase):
         self.save(self.row("lab", "requirement", "requirement", scope={"environment": "lab"}))
         self.assertFalse({"future", "expired", "lab"} & self.ids(self.query()))
         self.assertIn("lab", self.ids(self.query("灯塔系统", "--environment", "lab")))
+
+    def test_as_of_applies_to_replacement_and_returned_observations(self):
+        old = self.row("prior", "implementation", "implementation")
+        self.save(old)
+        newer = self.row("changed", "implementation", "implementation",
+                         relations=[self.edge("supersedes", "prior")])
+        newer["domain"]["valid_from"] = "2026-10-23T09:00:00+08:00"
+        newer["domain"]["observations"] = [
+            {"field": field, "value": value, "date": stamp, "state": "confirmed", "basis": "observed",
+             "evidence_refs": [{"type": "conversation", "value": "fixture " + field}]}
+            for field, value, stamp in [
+                ("source", "candidate ready", "2026-10-23T09:00:00+08:00"),
+                ("deployment", "service deployed", "2026-10-23T18:00:00+08:00")]]
+        self.save(newer)
+        early = self.ids(self.query("灯塔系统", "--as-of", "2026-09-16"))
+        self.assertIn("prior", early)
+        self.assertNotIn("changed", early)
+        midday = self.query("灯塔系统", "--as-of", "2026-10-23T12:00:00+08:00")
+        self.assertNotIn("prior", self.ids(midday))
+        item = next(i for i in midday["items"] if i["entry_id"] == newer["id"])
+        self.assertEqual(item["decision_history"][0]["entry_id"], old["id"])
+        self.assertIn("candidate ready", item["summary"])
+        self.assertNotIn("service deployed", item["summary"])
+        end = self.query("灯塔系统", "--as-of", "2026-10-23")
+        self.assertIn("service deployed", next(i["summary"] for i in end["items"] if i["entry_id"] == newer["id"]))
+
+    def test_unrelated_project_and_replacement_skip_evidence_io(self):
+        remote = "remote-project"
+        self.save(self.row(remote, "project", "map", project=remote, repo="elsewhere", aliases=["外地项目"]))
+        self.save(self.row("former", "requirement", "requirement", project=remote, repo="elsewhere"))
+        edge = self.edge("supersedes", "former", scope={"repo_id": "elsewhere"})
+        self.save(self.row("successor", "requirement", "requirement", project=remote, repo="elsewhere",
+                           relations=[edge]))
+        self.save(self.row("optics", "requirement", "requirement", aliases=["离焦补偿"]))
+        with patch.object(kb_evidence, "verify_entry_evidence", wraps=kb_evidence.verify_entry_evidence) as checks:
+            result = self.query("灯塔系统 离焦补偿")
+        self.assertIn("optics", self.ids(result))
+        checked = {call.args[0]["id"] for call in checks.call_args_list}
+        self.assertIn("entry-optics", checked)
+        self.assertFalse(checked & {"entry-remote-project", "entry-former", "entry-successor"})
 
     def test_changed_evidence_cannot_authorize_replacement(self):
         self.save(self.row("old", "requirement", "requirement"))

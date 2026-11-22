@@ -11,6 +11,16 @@ VALID_RUNTIME_SOURCES = frozenset({"production", "test"})
 TEST_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 
+def runtime_session_id(explicit: str = "", fallback: str = "") -> str:
+    """Use the caller's identity; never infer it from another rollout or cwd."""
+    for value in (explicit, os.environ.get("CODEX_THREAD_ID"),
+                  os.environ.get("CODEX_SESSION_ID"), fallback):
+        candidate = str(value or "").strip()
+        if TEST_RUN_ID_RE.fullmatch(candidate):
+            return candidate
+    return ""
+
+
 def runtime_scope(env: Mapping[str, str] | None = None) -> dict[str, str]:
     values = os.environ if env is None else env
     source = str(values.get(RUNTIME_SOURCE_ENV) or "production").strip().lower()

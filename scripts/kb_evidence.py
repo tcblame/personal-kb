@@ -6,9 +6,14 @@ import json
 import os
 import re
 import subprocess
+from contextlib import contextmanager
+from contextvars import ContextVar
+from functools import wraps
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
+import kb_git_reads
+from kb_timing import count, git_span, timed
 
 
 REVISION_EXCLUDED_FIELDS = frozenset({"record_rev", "used_count", "last_used_ts"})
@@ -27,6 +32,93 @@ FRESHNESS_STATES = frozenset(
 VALID_EVIDENCE_REF_TYPES = frozenset({"git_commit", "conversation", "retained"})
 GIT_COMMIT_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
 ASSET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$")
+FULL_OID_RE = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
+_FACTS: ContextVar[dict | None] = ContextVar("kb_evidence_facts", default=None)
+
+
+@contextmanager
+def verification_scope():
+    """One request only; cache successful object facts, never freshness/state."""
+    token = _FACTS.set({})
+    try:
+        yield
+    finally:
+        _FACTS.reset(token)
+
+
+def with_verification_scope(function):
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        with verification_scope():
+            return function(*args, **kwargs)
+    return wrapped
+
+
+@timed("evidence.fact_guard")
+def _fact_namespace(repo: Path) -> tuple | None:
+    # Special object stores/replacement refs can make an OID command mutable.
+    if any(os.environ.get(key) for key in (
+        "GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_REPLACE_REF_BASE",
+    )):
+        return None
+    try:
+        # _git_root already returns a resolved worktree. Avoid a second path
+        # walk over DrvFs for each object check.
+        worktree = repo
+        dotgit = worktree / ".git"
+        gitdir = dotgit
+        if dotgit.is_file():
+            locator = dotgit.read_text(encoding="utf-8").strip()
+            if not locator.startswith("gitdir: "):
+                return None
+            gitdir = (worktree / locator[8:]).resolve()
+        if not gitdir.is_dir():
+            return None
+        common = gitdir
+        common_file = gitdir / "commondir"
+        if common_file.is_file():
+            common = (gitdir / common_file.read_text(encoding="utf-8").strip()).resolve()
+        if (common / "info/grafts").exists():
+            return None
+        replacements = common / "refs/replace"
+        if replacements.exists() and any(replacements.rglob("*")):
+            return None
+        packed = common / "packed-refs"
+        if packed.exists() and "refs/replace/" in packed.read_text(encoding="utf-8"):
+            return None
+        signatures = []
+        for path in (common / "shallow", common / "config", gitdir / "config.worktree", packed):
+            if path.exists():
+                stat = path.stat()
+                signatures.append((stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
+            else:
+                signatures.append(None)
+        return (str(worktree), str(gitdir), str(common), tuple(signatures))
+    except (OSError, ValueError):
+        return None
+
+
+def _object_fact(repo: Path, *args: str) -> tuple[int, str, str]:
+    """Caller supplies immutable full-OID operands; failures are never cached."""
+    facts = _FACTS.get()
+    namespace = _fact_namespace(repo) if facts is not None else None
+    if namespace is None:
+        return _run_git(repo, *args)
+    key = (namespace, args)
+    if key in facts:
+        count("evidence.git_fact_cache_hits")
+        return facts[key]
+    count("evidence.git_fact_cache_misses")
+    result = _run_git(repo, *args)
+    if result[0] == 0:
+        facts[key] = result
+    return result
+
+
+def _commit_exists(repo: Path, commit: str) -> tuple[int, str, str]:
+    run = _object_fact if FULL_OID_RE.fullmatch(commit) else _run_git
+    return run(repo, "cat-file", "-e", f"{commit}^{{commit}}")
 
 
 def validate_evidence_refs(value: Any) -> list[str]:
@@ -134,14 +226,15 @@ def has_resolvable_evidence_ref(entry: dict[str, Any], workspace_dir: str | Path
 
 
 def _run_git(repo: Path, *args: str) -> tuple[int, str, str]:
-    proc = subprocess.run(
-        ["git", *args],
-        cwd=str(repo),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+    with git_span(args, cwd=repo):
+        proc = subprocess.run(
+            ["git", *args],
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
     return proc.returncode, (proc.stdout or "").strip(), (proc.stderr or "").strip()
 
 
@@ -188,9 +281,10 @@ def _resolve_path(value: str, workspace_dir: Path) -> Path:
 
 
 def _git_root(path: Path) -> Path | None:
+    if not path.exists():
+        return None
     cwd = path if path.is_dir() else path.parent
-    code, out, _ = _run_git(cwd, "rev-parse", "--show-toplevel")
-    return Path(out).resolve() if code == 0 and out else None
+    return kb_git_reads.repository_root(cwd, lambda: _run_git(cwd, "rev-parse", "--show-toplevel"))
 
 
 def _canonical_remote(remote: str) -> str:
@@ -214,7 +308,7 @@ def _canonical_remote(remote: str) -> str:
     return value.replace("\\", "/").rstrip("/")
 
 
-def _repo_id(repo: Path) -> str:
+def _remote_hash(repo: Path) -> str | None:
     code, remotes, _ = _run_git(repo, "remote")
     if code == 0:
         names = [line.strip() for line in remotes.splitlines() if line.strip()]
@@ -225,6 +319,13 @@ def _repo_id(repo: Path) -> str:
             if canonical:
                 return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
+    return None
+
+
+def _repo_id(repo: Path) -> str:
+    identity = kb_git_reads.remote_identity(repo, lambda: _remote_hash(repo))
+    if identity:
+        return identity
     code, roots, _ = _run_git(repo, "rev-list", "--max-parents=0", "--all")
     root_commits = ",".join(sorted(line.strip() for line in roots.splitlines() if line.strip())) if code == 0 else ""
     identity = f"local:{repo.name}:{root_commits}"
@@ -239,24 +340,47 @@ def _current_branch(repo: Path) -> str:
     return f"detached-{head[:12]}" if code == 0 and head else "unknown"
 
 
+def _current_checkout(repo: Path) -> tuple[str, str]:
+    return kb_git_reads.checkout(repo, lambda: _read_checkout(repo))
+
+
+def _read_checkout(repo: Path) -> tuple[str, str]:
+    # A full symbolic ref stays unambiguous when a tag shares the branch name.
+    code, output, _ = _run_git(repo, "rev-parse", "HEAD", "--symbolic-full-name", "HEAD")
+    lines = output.splitlines()
+    if code != 0 or len(lines) != 2 or not FULL_OID_RE.fullmatch(lines[0]):
+        return "unknown", ""
+    head, branch = lines
+    branch = branch[len("refs/heads/"):] if branch.startswith("refs/heads/") else f"detached-{head[:12]}"
+    return branch, head
+
+
 def _worktree_state(repo: Path, relative: str) -> str:
-    code, unmerged, _ = _run_git(repo, "ls-files", "-u", "--", relative)
-    if code == 0 and unmerged:
+    try:
+        code, unmerged, _ = _run_git(repo, "ls-files", "-u", "--", relative)
+    except OSError:
+        return "unresolvable"
+    if code != 0:
+        return "unresolvable"
+    if unmerged:
         return "conflicted"
     # `git status --porcelain` uses the first two columns to distinguish
     # staged (`M `) from unstaged (` M`) changes.  Do not call `_run_git`
     # here: its general-purpose `.strip()` would remove the significant
     # leading status space and turn every unstaged edit into `staged`.
-    proc = subprocess.run(
-        ["git", "status", "--porcelain=v1", "--untracked-files=all", "--", relative],
-        cwd=str(repo),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    status = proc.stdout.rstrip("\r\n") if proc.returncode == 0 else ""
-    if proc.returncode != 0 or not status:
+    args = ["status", "--porcelain=v1", "--untracked-files=all", "--", relative]
+    try:
+        with git_span(args, cwd=repo):
+            proc = subprocess.run(
+                ["git", *args], cwd=str(repo), capture_output=True,
+                text=True, encoding="utf-8", errors="replace",
+            )
+    except OSError:
+        return "unresolvable"
+    if proc.returncode != 0:
+        return "unresolvable"
+    status = proc.stdout.rstrip("\r\n")
+    if not status:
         return "clean"
     states = [line[:2] for line in status.splitlines() if len(line) >= 2]
     conflict_codes = {"DD", "AU", "UD", "UA", "DU", "AA", "UU"}
@@ -406,6 +530,8 @@ def _verify_git_file(snapshot: dict[str, Any], workspace: Path) -> dict[str, Any
             return {"state": "unresolvable", "reason": "source is outside the Git repository"}
 
     state = _worktree_state(repo, relative)
+    if state == "unresolvable":
+        return {"state": "unresolvable", "reason": "Git worktree/index state could not be checked"}
     if state == "conflicted":
         return {"state": "conflicted", "reason": "evidence file has an unresolved Git conflict"}
     if state in {"modified", "staged", "untracked"}:
@@ -416,20 +542,23 @@ def _verify_git_file(snapshot: dict[str, Any], workspace: Path) -> dict[str, Any
         return {"state": "diverged", "reason": "repository identity differs from the snapshot"}
 
     expected_branch = str(snapshot.get("branch") or "").strip()
-    current_branch = _current_branch(repo)
+    current_branch, current_head = _current_checkout(repo)
+    if not current_head:
+        return {"state": "unresolvable", "reason": "current Git checkout could not be resolved"}
     if expected_branch and expected_branch != current_branch:
         return {"state": "diverged", "reason": f"branch changed: {expected_branch} -> {current_branch}"}
 
     expected_commit = str(snapshot.get("commit") or "").strip()
     if expected_commit:
-        exists_code, _, _ = _run_git(repo, "cat-file", "-e", f"{expected_commit}^{{commit}}")
+        exists_code, _, _ = _commit_exists(repo, expected_commit)
         if exists_code != 0:
             return {"state": "diverged", "reason": "snapshotted commit is no longer resolvable"}
-        ancestor_code, _, _ = _run_git(repo, "merge-base", "--is-ancestor", expected_commit, "HEAD")
+        run = _object_fact if FULL_OID_RE.fullmatch(expected_commit) else _run_git
+        ancestor_code, _, _ = run(repo, "merge-base", "--is-ancestor", expected_commit, current_head)
         if ancestor_code != 0:
             return {"state": "diverged", "reason": "current HEAD no longer descends from the snapshotted commit"}
 
-    blob_code, current_blob, _ = _run_git(repo, "rev-parse", f"HEAD:{relative}")
+    blob_code, current_blob, _ = _object_fact(repo, "rev-parse", f"{current_head}:{relative}")
     if blob_code != 0 or not current_blob:
         return {"state": "needs_recheck", "reason": "evidence path is absent from current HEAD"}
     if current_blob != str(snapshot.get("blob_oid") or "").strip():
@@ -447,10 +576,14 @@ def _verify_git_commit(snapshot: dict[str, Any], workspace: Path) -> dict[str, A
     commit = str(snapshot.get("commit") or "").strip()
     if not commit:
         return {"state": "unresolvable", "reason": "commit is missing"}
-    exists_code, _, _ = _run_git(repo, "cat-file", "-e", f"{commit}^{{commit}}")
+    exists_code, _, _ = _commit_exists(repo, commit)
     if exists_code != 0:
         return {"state": "unresolvable", "reason": "commit is unavailable locally"}
-    ancestor_code, _, _ = _run_git(repo, "merge-base", "--is-ancestor", commit, "HEAD")
+    _, current_head = _current_checkout(repo)
+    if not current_head:
+        return {"state": "unresolvable", "reason": "current Git checkout could not be resolved"}
+    run = _object_fact if FULL_OID_RE.fullmatch(commit) else _run_git
+    ancestor_code, _, _ = run(repo, "merge-base", "--is-ancestor", commit, current_head)
     if ancestor_code != 0:
         return {"state": "diverged", "reason": "commit is not an ancestor of current HEAD"}
     return {"state": "fresh", "reason": "commit is reachable from current local HEAD"}
@@ -496,6 +629,7 @@ _STATE_PRIORITY = {
 }
 
 
+@timed("evidence.verify")
 def verify_entry_evidence(
     entry: dict[str, Any],
     workspace_dir: str | Path | None = None,
@@ -528,6 +662,7 @@ def verify_entry_evidence(
     workspace = Path(str(workspace_value)).expanduser().resolve(strict=False)
     items: list[dict[str, Any]] = []
     for snapshot in snapshots:
+        count("evidence.snapshots_checked")
         if not isinstance(snapshot, dict):
             result = {"state": "unresolvable", "reason": "snapshot must be an object"}
             items.append(result)

@@ -34,7 +34,9 @@ def build_identity() -> dict:
             'data_root': str(storage_layout().root),
             'capabilities': ['session-topic-identity', 'scope-anchor', 'exclusive-receipt',
                              'unresolved-attempt-closeout', 'own-rollout-identity',
-                             'domain-model-v1', 'project-graph-retrieval', 'scoped-supersession']}
+                             'domain-model-v1', 'project-graph-retrieval', 'scoped-supersession',
+                             'dated-object-history', 'focused-action-recall',
+                             'as-of-recall', 'paired-alias-learning']}
 
 
 def main(argv: list[str]) -> int:

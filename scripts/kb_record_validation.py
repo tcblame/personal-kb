@@ -56,14 +56,29 @@ def evidence_errors(
     return errors
 
 
+def _valid_recall_count(values: list, minimum: int, seed_limit: int, questions: set[str]) -> bool:
+    if minimum <= len(values) <= seed_limit:
+        return True
+    if len(values) < minimum or len(values) > seed_limit + len(questions):
+        return False
+    # Beyond the initial vocabulary, each extra slot needs a saved positive
+    # example and only phrases used in those examples can extend the seed set.
+    untested = sum(not any(str(value).strip().casefold() in query for query in questions) for value in values)
+    return untested <= seed_limit
+
+
 def metadata_errors(entry: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     aliases = [value for value in _values(entry.get("aliases")) if str(value).strip()]
     triggers = [value for value in _values(entry.get("trigger_terms")) if str(value).strip()]
-    if len(aliases) < 2 or len(aliases) > 8:
-        errors.append("aliases must contain 2-8 values")
-    if len(triggers) < 3 or len(triggers) > 15:
-        errors.append("trigger_terms must contain 3-15 values")
+    checks = entry.get("recall_checks")
+    questions = set()
+    if isinstance(checks, dict) and any(isinstance(q, str) and q.strip() for q in _values(checks.get("negative"))):
+        questions = {q.strip().casefold() for q in _values(checks.get("positive")) if isinstance(q, str) and q.strip()}
+    if not _valid_recall_count(aliases, 2, 8, questions):
+        errors.append("use 2-8 initial aliases; additional aliases need distinct saved positive recall checks and a negative control")
+    if not _valid_recall_count(triggers, 3, 15, questions):
+        errors.append("use 3-15 initial trigger terms; additional terms need distinct saved positive recall checks and a negative control")
     if entry.get("artifact_locator") and entry.get("kind") != "map":
         errors.append("artifact_locator records must use kind=map")
     return errors

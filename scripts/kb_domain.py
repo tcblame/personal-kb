@@ -63,7 +63,7 @@ def domain_errors(entry: dict[str, Any]) -> list[str]:
         return ["domain must be an object"]
     errors = []
     allowed = {"entity_id", "entity_type", "project_id", "repo_id", "state", "scope",
-               "relations", "valid_from", "valid_until"}
+               "relations", "observations", "valid_from", "valid_until"}
     if set(d) - allowed:
         errors.append("domain has unsupported fields: " + ", ".join(sorted(set(d) - allowed)))
     for field in ("entity_id", "project_id"):
@@ -82,6 +82,9 @@ def domain_errors(entry: dict[str, Any]) -> list[str]:
         errors.append("domain.repo_id must be a stable opaque ID")
     errors.extend(_scope_errors(d.get("scope", {}), "domain.scope"))
     errors.extend(_validity_errors(d, "domain"))
+    if "observations" in d:
+        from kb_timeline import observation_errors
+        errors.extend(observation_errors(d["observations"]))
     relations = d.get("relations", [])
     if not isinstance(relations, list) or len(relations) > model()["max_relations_per_record"]:
         return errors + ["domain.relations must be a bounded list"]
@@ -193,7 +196,9 @@ def load_graph(*, rebuild: bool = False) -> dict:
 def reference_errors(entry: dict) -> list[str]:
     if "domain" not in entry or domain_errors(entry):
         return []
-    entries = [e for e in load_graph()["entries"] if e.get("id") != entry.get("id")]
+    owners = load_graph()["entries"]
+    previous = next((e for e in owners if e.get("id") == entry.get("id")), {})
+    entries = [e for e in owners if e.get("id") != entry.get("id")]
     entries.append(entry)
     by_id: dict[str, list[dict]] = {}
     for row in entries:
@@ -205,6 +210,26 @@ def reference_errors(entry: dict) -> list[str]:
     project = by_id.get(d["project_id"], [])
     if len(project) != 1 or project[0]["domain"]["entity_type"] != "project":
         errors.append("domain.project_id must resolve to exactly one project record")
+    history = d.get("observations", [])
+    prior = previous.get("domain", {}).get("observations", [])
+    if any(event not in history for event in prior):
+        errors.append("preserve dated observations when updating an owner")
+    from kb_timeline import check_new_assets, event_id
+    errors.extend(check_new_assets([event for event in history if event not in prior]))
+    seen_events = {}
+    for event in history:
+        identity = event_id(event)
+        if identity in seen_events:
+            errors.append("duplicate dated observation")
+        if "withdraws" in event:
+            corrected = seen_events.get(event["withdraws"], {})
+            if corrected.get("field") != event["field"] or "withdraws" in corrected:
+                errors.append("withdraws must name an earlier observation for this same field")
+        seen_events[identity] = event
+        if "target" in event:
+            targets = by_id.get(event["target"], [])
+            if len(targets) != 1 or targets[0]["domain"]["project_id"] != d["project_id"]:
+                errors.append("dated relationship target must resolve within its project")
     for relation in d.get("relations", []):
         targets = by_id.get(relation["target"], [])
         if len(targets) != 1:

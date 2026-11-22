@@ -21,9 +21,11 @@ from kb_lib import configure_utf8_streams
 
 configure_utf8_streams()
 
+import kb_git_reads
 import kb_search
 import kb_session_brief
-from kb_runtime import runtime_scope
+from kb_runtime import runtime_scope, runtime_session_id
+from kb_timing import count, span, timed
 import kb_evidence
 import kb_domain
 import kb_project_view
@@ -35,6 +37,7 @@ from kb_lib import (
     expand_query_variants,
     load_config,
     load_synonyms,
+    read_jsonl,
     skill_root_dir,
     storage_layout,
 )
@@ -122,6 +125,7 @@ def _validate_scope_anchors(query: str, anchors: list[str]) -> None:
         )
 
 
+@timed("retrieve.receipt")
 def _write_receipt(path_value: str, payload: dict[str, Any]) -> None:
     """Publish a complete new receipt without replacing existing files or KB data."""
     if not str(path_value or "").strip():
@@ -305,6 +309,15 @@ CONTEXT_GENERIC_TERMS = {
     "springboot",
     "spring-boot",
     "技术栈",
+}
+
+# These words remain valid business anchors. Only an explicit product-subject
+# query needs additional topical evidence beyond these broad overlaps.
+PRODUCT_SUBJECTS = ("codex", "claude", "gemini")
+SUBJECT_BROAD_TERMS = {
+    "token", "tokens", "对话", "聊天", "chat", "conversation", "模型", "model",
+    "models", "agent", "agents", "成本", "cost", "限制", "limit", "limits",
+    "优化", "配置", "设置", "系统", "开销", "费用", "costs",
 }
 
 ARTIFACT_QUERY_MARKERS = (
@@ -558,6 +571,84 @@ def _query_planning_terms(query: str) -> list[str]:
     return terms
 
 
+def _paired_trigger_terms(entry: dict[str, Any], query: str) -> set[str]:
+    """Two independent curated terms must identify the same title or alias."""
+    triggers = entry.get("trigger_terms") or []
+    if not isinstance(triggers, list):
+        return set()
+    found = {term for term in triggers if isinstance(term, str)
+             and re.fullmatch(r"[\u4e00-\u9fff]{2,12}", term)
+             and term in query and not _is_low_signal_term(term)
+             and term not in CONTEXT_GENERIC_TERMS}
+    # Counting a short word inside a longer match would turn one clue into two.
+    independent = {term for term in found if not any(term != other and term in other for other in found)}
+    if len(independent) < 2:
+        return set()
+    aliases = entry.get("aliases") or []
+    phrases = [entry.get("title", ""), *(aliases if isinstance(aliases, list) else [])]
+    for phrase in phrases:
+        matching = {term for term in independent if term in str(phrase)}
+        if len(matching) >= 2:
+            return matching
+    return set()
+
+
+def _symbolic_trigger(phrase: str, text: str) -> bool:
+    # Segmentation loses punctuation in compound notations and qualified identifiers.
+    syntax = r"(?:[0-9]+(?:\+[0-9]+){2,}|[a-z][a-z0-9]*(?:[_.][a-z0-9]+)+)"
+    return bool(re.fullmatch(syntax, phrase) and
+                re.search(r"(?<![a-z0-9_.+])" + re.escape(phrase) + r"(?![a-z0-9_.+])", text))
+
+
+def _literal_cjk_anchors(query: str) -> list[str]:
+    """Recover explicit stored phrases inside an unsegmented Chinese question.
+
+    Use literal phrases and corroborated short triggers from current records.
+    """
+    if not re.search(r"[\u4e00-\u9fff]", query):
+        return []
+    text = query.casefold()
+    matches: set[str] = set()
+    for path in sorted(storage_layout().records.rglob("kb.jsonl")):
+        for entry in read_jsonl(path):
+            if entry.get("_deleted") or entry.get("_archived") or _is_noncurrent(entry):
+                continue
+            matches.update(_paired_trigger_terms(entry, text))
+            for field in ("aliases", "trigger_terms"):
+                values = entry.get(field) or []
+                if not isinstance(values, list):
+                    continue
+                for value in values:
+                    phrase = str(value).strip().casefold()
+                    if (4 <= len(re.findall(r"[\u4e00-\u9fff]", phrase)) and len(phrase) <= 64
+                            and phrase in text and not _is_low_signal_term(phrase)) or _symbolic_trigger(phrase, text):
+                        matches.add(phrase)
+    return sorted(matches, key=lambda value: (-len(value), value))[:6]
+
+
+CHAT_LINK = re.compile(r"(?:codex://(?:threads?|chats?)/|\bcodex\s+resume\s+)"
+                       r"([a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})(?![a-f0-9-])", re.I)
+
+
+def _linked_records(query, project, include_noncurrent):
+    ids = {value.lower() for value in CHAT_LINK.findall(query)}
+    if not ids:
+        return []
+    found = []
+    for path in sorted(storage_layout().records.rglob("kb.jsonl")):
+        for entry in read_jsonl(path):
+            if entry.get("_deleted") or entry.get("_archived") or (_is_noncurrent(entry) and not include_noncurrent):
+                continue
+            domain = entry.get("domain") or {}
+            refs = [ref for obj in [entry, *domain.get("observations", []), *domain.get("relations", [])]
+                    for ref in obj.get("evidence_refs", []) if ref.get("type") == "conversation"]
+            linked = {value.lower() for ref in refs for value in CHAT_LINK.findall(str(ref.get("value", "")))}
+            overlap = sorted(ids & linked)
+            if overlap and project.eligible(entry, include_noncurrent=include_noncurrent):
+                found.append((entry, {"type": "conversation", "threads": overlap}))
+    return found
+
+
 def _is_code_like(term: str) -> bool:
     return bool(re.search(r"[a-z][\w-]*\.(py|md|json|ya?ml|toml|java|ts|tsx|js|jsx)$", term)) or bool(
         re.search(r"[/\\_.:-]", term)
@@ -651,11 +742,23 @@ def _is_prior_decision_query(query: str) -> bool:
     return ambiguous_history and decision_context
 
 
+def _query_subjects(query: str) -> list[str]:
+    residual = re.sub(
+        r"(?:用|使用|通过|借助|让|请|using\s+|with\s+|via\s+)\s*"
+        r"(?:codex|claude|gemini)\s*(?=(?:来|帮我|帮助我|to\s+)?\s*"
+        r"(?:排查|检查|分析|修复|修改|实现|处理|查|看|写|执行|整理|检索|搜索|生成|debug|fix|review|run|write|search))",
+        " ", query, flags=re.I,
+    )
+    return [name for name in PRODUCT_SUBJECTS
+            if re.search(r"(?<![a-z0-9])" + name + r"(?![a-z0-9])", residual, re.I)]
+
+
 def _concrete_query_terms(query: str) -> list[str]:
+    subjects = _query_subjects(query)
     terms = [
         term
         for term in _specific_terms(_query_planning_terms(query))
-        if term not in CONTEXT_GENERIC_TERMS
+        if term not in CONTEXT_GENERIC_TERMS or term in subjects
     ]
     compact = query.lower()
     if re.search(r"\bcc[\s_-]+switch\b", compact):
@@ -757,6 +860,134 @@ def _matched_anchor_terms(entry: dict[str, Any], terms: list[str], fields: set[s
 
 def _has_term_match(entry: dict[str, Any], terms: list[str], fields: set[str]) -> bool:
     return bool(_matched_anchor_terms(entry, terms, fields))
+
+
+def _informative_subject_term(value: str) -> bool:
+    pieces = re.findall(r"[a-z0-9_./:-]+|[\u4e00-\u9fff]+", value.casefold())
+    return any(len(piece) >= 2 and not piece.isdigit()
+               and piece not in SUBJECT_BROAD_TERMS and piece not in CONTEXT_GENERIC_TERMS
+               and not _is_low_signal_term(piece) for piece in pieces)
+
+
+def _subject_compatible(entry: dict[str, Any], query: str, subjects: list[str], topics: list[str]) -> bool:
+    if not subjects:
+        return True
+    descriptive = (STRONG_FIELDS | MEDIUM_FIELDS) - {"source_paths", "key_files", "repo", "branch"}
+    # A tool name appearing only in a storage path is not the record's subject.
+    same_subject = any(re.search(r"(?<![a-z0-9])" + name + r"(?![a-z0-9])", _field_text(entry.get(field)), re.I)
+                       for name in subjects for field in descriptive)
+    if _has_term_match(entry, topics, STRONG_FIELDS | MEDIUM_FIELDS):
+        return True
+    # Stored aliases/trigger phrases can be embedded in unsegmented Chinese.
+    # This retains topic-relevant cross-project experience without a product name.
+    compact_query = re.sub(r"[\s_-]+", "", query.casefold())
+    for field in ("aliases", "trigger_terms"):
+        values = entry.get(field) or []
+        for value in values if isinstance(values, list) else [values]:
+            phrase = str(value).strip()
+            if (_informative_subject_term(phrase)
+                    and re.sub(r"[\s_-]+", "", phrase.casefold()) in compact_query):
+                return True
+    if not same_subject or topics:
+        return False
+    # Even when the query contains only broad topic words (e.g. Codex token),
+    # the product name alone must not admit unrelated installation records.
+    other_terms = [term for term in _specific_terms(_query_planning_terms(query))
+                   if term not in subjects and term not in CONTEXT_GENERIC_TERMS]
+    return not other_terms or _has_term_match(entry, other_terms, STRONG_FIELDS | MEDIUM_FIELDS)
+
+
+def _explicit_alias_match(entry: dict[str, Any], terms: list[str]) -> bool:
+    original = " ".join(terms)
+    if _paired_trigger_terms(entry, original):
+        return True
+    triggers = entry.get("trigger_terms") or []
+    if isinstance(triggers, list) and any(_symbolic_trigger(str(t).casefold(), original)
+                                          for t in triggers if str(t).casefold() not in _scope_words(entry)):
+        return True
+    aliases = entry.get("aliases") or []
+    for alias in aliases if isinstance(aliases, list) else [aliases]:
+        phrase = str(alias).strip().casefold()
+        if (len(re.findall(r"[\u4e00-\u9fff]", phrase)) >= 4
+                and _informative_subject_term(phrase)
+                and _term_matches_text(phrase, " ".join(terms))):
+            return True
+    return False
+
+
+def _scope_words(entry: dict[str, Any]) -> set[str]:
+    # Both a repository basename and its components identify where, not what.
+    parts = re.split(r"[/\\\s]+", f"{entry.get('repo', '')} {entry.get('branch', '')}".casefold())
+    return {word for part in parts for word in (part, *re.split(r"[_-]+", part)) if word}
+
+
+def _prefer_learned_alias_to_repo_name(candidates: dict, owners: set[str]) -> None:
+    if len(owners) != 1:
+        return
+    owner = candidates[next(iter(owners))]
+    project_terms = _scope_words({"repo": owner.get("repo", "")})
+    for item in candidates.values():
+        if item["entry_id"] == owner["entry_id"]:
+            continue
+        anchors = {match["term"].casefold() for match in item.get("matched_anchors", [])}
+        if anchors and anchors <= project_terms:
+            item["_score"] = min(item["_score"], owner["_score"] - 0.01)
+
+
+def _named_subtopic(entry: dict, terms: list[str], repo: str, branch: str) -> bool:
+    """An explicitly named, curated operation inside a compound in-repository question."""
+    if (entry.get("kind") != "requirement" or not repo or entry.get("repo") != repo
+            or entry.get("branch") != branch):
+        return False
+    title = entry.get("title", "")
+    aliases = entry.get("aliases") or []
+    triggers = set(entry.get("trigger_terms") or [])
+    return any(re.fullmatch(r"[一-鿿]{4,16}", term) and term in triggers
+               and _informative_subject_term(term) and term in title
+               and any(term in alias for alias in aliases) for term in terms)
+
+
+def _guidance_has_task_topic(entry: dict[str, Any], terms: list[str]) -> bool:
+    """Do not let a lone resource name admit unrelated maps or standing rules.
+
+    Keep short lookups and exact code/path identifiers. For longer requests,
+    require another original task anchor in descriptive fields, not merely a
+    repository path or a term introduced by the query planner. Incident and
+    implementation records retain their existing cross-project recall rules.
+    """
+    if entry.get("kind") not in {"map", "requirement"} or len(terms) < 3:
+        return True
+    descriptive = set(MATCH_FIELDS) - {"source_paths", "key_files", "repo", "branch"}
+    matches = _matched_anchor_terms(entry, terms, descriptive) - _scope_words(entry)
+    return len(matches) >= 2 or any(_is_code_like(term) for term in matches) or _explicit_alias_match(entry, terms)
+
+
+def _topical_candidate(entry: dict[str, Any], terms: list[str], *, allow_paths: bool = False) -> bool:
+    """Do not turn a project/path match into task relevance.
+
+    Long diagnostic queries need two descriptive anchors, or an exact code
+    identifier. Repository components describe scope, not a second topic.
+    Short lookups stay recall biased. Story-only recall remains --include-weak.
+    """
+    concrete = [term for term in _specific_terms(terms)
+                if term not in CONTEXT_GENERIC_TERMS and term not in PRODUCT_SUBJECTS]
+    if len(concrete) < 3:
+        return True
+    fields = {"title", "aliases", "trigger_terms", "tags", "term", "definition", "key_facts"}
+    if allow_paths:
+        fields.update({"source_paths", "key_files"})
+    matches = _matched_anchor_terms(entry, concrete, fields) - _scope_words(entry)
+    if any(_is_code_like(term) for term in matches):
+        return True
+    # An explicit, informative stored phrase is already a precise anchor;
+    # requiring a second unrelated word would lose transferable experience.
+    if _explicit_alias_match(entry, terms):
+        return True
+    # Two shared words become weak evidence as a query adds more distinct
+    # constraints (for example a product and a generic failure symptom).
+    # Keep precise stored phrases and code identifiers above as recall paths.
+    required = 3 if len(concrete) >= 6 else 2
+    return len(matches) >= required
 
 
 def _expanded_anchor_terms(
@@ -925,6 +1156,7 @@ def _plan_query_groups(
     *,
     enabled: bool = True,
     max_plans: int = DEFAULT_MAX_QUERY_PLANS,
+    literal_anchors: list[str] | None = None,
 ) -> list[QueryPlan]:
     if not enabled:
         return [QueryPlan("task", query, 0.0, None)]
@@ -994,6 +1226,9 @@ def _plan_query_groups(
         _add_plan(plans, seen, QueryPlan("hard-anchors", " ".join(hard[:6]), 0.60, "any"))
     if specific:
         _add_plan(plans, seen, QueryPlan("specific-terms", " ".join(specific[:6]), 0.35, "any"))
+
+    if literal_anchors:
+        _add_plan(plans, seen, QueryPlan("literal-anchors", " ".join(literal_anchors), 0.80, "any"))
 
     # Always retain the raw task query, but keep the total plan budget small.
     # Specialized plans are ranked by their declared confidence; insertion
@@ -1268,6 +1503,7 @@ def _similar_result(left: dict[str, Any], right: dict[str, Any]) -> bool:
     return _title_similarity(title_left, title_right) >= 0.88
 
 
+@timed("retrieve.dedupe")
 def _dedupe_similar_items(items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
     kept: list[dict[str, Any]] = []
     removed = 0
@@ -1279,6 +1515,7 @@ def _dedupe_similar_items(items: list[dict[str, Any]]) -> tuple[list[dict[str, A
     return kept, removed
 
 
+@timed("retrieve.filter_freshness")
 def _filter_freshness_items(
     items: list[dict[str, Any]],
     *,
@@ -1308,6 +1545,7 @@ def _filter_freshness_items(
     return retained, len(items) - len(retained)
 
 
+@timed("retrieve.diversity")
 def _apply_result_diversity(
     items: list[dict[str, Any]],
     *,
@@ -1454,7 +1692,7 @@ def _compact_entry(
         warnings.append(str(freshness["warning"]))
 
     summary_entry = formatted_entry
-    if is_cross_project and formatted_entry.get("kind") == "map":
+    if is_cross_project and formatted_entry.get("kind") == "map" and not formatted_entry.get("_evidence_lead"):
         summary_entry = {**formatted_entry, "story": ""}
 
     matched_anchors = _matched_anchor_details(raw_entry, terms)
@@ -1490,8 +1728,8 @@ def _compact_entry(
         "matched_fields": fields,
         "matched_anchors": matched_anchors[:12],
         "summary": _summary(summary_entry, max_snippet_chars),
-        "source_paths": [] if is_cross_project else _short_list(formatted_entry.get("source_paths", raw_entry.get("source_paths")), 3),
-        "key_files": [] if is_cross_project else _short_list(formatted_entry.get("key_files", raw_entry.get("key_files")), 3),
+        "source_paths": [] if is_cross_project and not formatted_entry.get("_evidence_lead") else _short_list(formatted_entry.get("source_paths", raw_entry.get("source_paths")), 3),
+        "key_files": [] if is_cross_project and not formatted_entry.get("_evidence_lead") else _short_list(formatted_entry.get("key_files", raw_entry.get("key_files")), 3),
     }
     if is_cross_project and item["kind"] == "map" and not item["summary"]:
         item["summary"] = _cross_project_map_summary(formatted_entry, max_snippet_chars)
@@ -1529,6 +1767,9 @@ def _recent_cutoff(value: str) -> datetime | None:
     return datetime.now() - timedelta(days=days)
 
 
+@timed("retrieve.build")
+@kb_git_reads.read_scope()
+@kb_evidence.with_verification_scope
 def build_context(args: argparse.Namespace) -> dict[str, Any]:
     if args.min_confidence < 0.0 or args.min_confidence > 1.0:
         raise ValueError("--min-confidence must be between 0 and 1")
@@ -1573,6 +1814,13 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
     concrete_query_terms = (
         decision_subject_terms if prior_decision_query else _concrete_query_terms(args.query)
     )
+    with span("retrieve.literal_anchors"):
+        literal_anchors = [] if args.no_plan else _literal_cjk_anchors(args.query)
+    concrete_query_terms = list(dict.fromkeys([*concrete_query_terms, *literal_anchors]))
+    # The URI scheme names the chat client, not the subject of the linked work.
+    subjects = _query_subjects(CHAT_LINK.sub(" ", args.query))
+    subject_topics = [term for term in concrete_query_terms
+                      if term not in subjects and _informative_subject_term(term)]
 
     search_args = argparse.Namespace(
         global_search=args.global_search,
@@ -1589,6 +1837,7 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
         args.query,
         enabled=not args.no_plan,
         max_plans=max_query_plans,
+        literal_anchors=literal_anchors,
     )
     session_anchor_terms: list[str] = []
     for plan in plans:
@@ -1602,7 +1851,7 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
         ):
             if term not in session_anchor_terms:
                 session_anchor_terms.append(term)
-    original_terms = _query_planning_terms(args.query)
+    original_terms = list(dict.fromkeys([*_query_planning_terms(args.query), *literal_anchors]))
     required_tags = kb_search._parse_tags(args.tags)
     reference_repo = None
     reference_branch = args.branch
@@ -1613,17 +1862,22 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
 
     if not args.no_session_briefs:
         query_group_payload.append({"name": "recent-session", "query": args.query})
-        recent_briefs = kb_session_brief.search_recent_briefs(
-            args.query,
-            cwd=Path.cwd(),
-            repo_name_override=(args.repo.strip() or None),
-            branch_override=(args.branch.strip() or None),
-            recent_days=max(1, args.session_brief_days),
-            limit=min(args.session_brief_limit, requested_limit),
-            include_cross_repo=args.global_search,
-            max_snippet_chars=max(80, args.max_snippet_chars),
-        )
+        with span("retrieve.session_briefs"):
+            recent_briefs = kb_session_brief.search_recent_briefs(
+                args.query,
+                cwd=Path.cwd(),
+                repo_name_override=(args.repo.strip() or None),
+                branch_override=(args.branch.strip() or None),
+                recent_days=max(1, args.session_brief_days),
+                limit=min(args.session_brief_limit, requested_limit),
+                include_cross_repo=args.global_search,
+                max_snippet_chars=max(80, args.max_snippet_chars),
+            )
         for index, item in enumerate(recent_briefs):
+            if not args.include_weak and not _subject_compatible(item, args.query, subjects, subject_topics):
+                count("retrieve.rejected_subject")
+                rejected_count += 1
+                continue
             entry_id = item.get("entry_id")
             if not entry_id:
                 continue
@@ -1671,7 +1925,7 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
         )
         stderr_capture = io.StringIO()
         stderr_context = contextlib.nullcontext() if args.debug else contextlib.redirect_stderr(stderr_capture)
-        with stderr_context:
+        with stderr_context, span("retrieve.search_raw"):
             raw_results, ctx = kb_search._search_once(
                 query=plan.query,
                 args=group_args,
@@ -1702,16 +1956,36 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
     def verify_once(entry: dict) -> dict:
         key = str(entry.get("id") or "")
         if key not in evidence_cache:
+            count("evidence.entry_cache_misses")
             evidence_cache[key] = _safe_evidence_verification(entry)
+        else:
+            count("evidence.entry_cache_hits")
         return evidence_cache[key]
 
     project_context = None
+    as_of = None
+    period = getattr(args, "as_of", "")
+    if not period and not getattr(args, "no_domain", False) and any(
+            word in args.query for word in ("当时", "截至", "那天", "那一天")) and not any(
+            word in args.query for word in ("现在", "如今", "目前")):
+        dates = re.findall(r"(?<!\d)(\d{4})\s*[-年]\s*(\d{1,2})\s*[-月]\s*(\d{1,2})(?!\d)", args.query)
+        if len(dates) == 1:
+            year, month, day = map(int, dates[0])
+            period = f"{year:04d}-{month:02d}-{day:02d}"
+    if period:
+        from kb_timeline import bounds
+        from zoneinfo import ZoneInfo
+        if args.no_domain:
+            raise ValueError("--as-of requires domain history")
+        history_zone = ZoneInfo("Asia/Shanghai")
+        as_of = bounds(period, history_zone)[1]
     if not getattr(args, "no_domain", False):
-        project_context = kb_project_view.ProjectContext(
-            args.query, repo=reference_repo or args.repo, branch=reference_branch,
-            environment=getattr(args, "environment", ""),
-            project_id=getattr(args, "project_id", ""), verify=verify_once,
-        )
+        with span("retrieve.domain_init"):
+            project_context = kb_project_view.ProjectContext(
+                args.query, repo=reference_repo or args.repo, branch=reference_branch,
+                environment=getattr(args, "environment", ""),
+                project_id=getattr(args, "project_id", ""), verify=verify_once, as_of=as_of,
+            )
 
     def format_entry(raw: dict) -> dict:
         if project_context and project_context.same_project(raw):
@@ -1720,19 +1994,46 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
                 and raw["domain"]["project_id"] == project_context.project_id
                 and project_context.eligible(raw, include_noncurrent=True)):
             return {**raw, "_same_project": True, "_domain_history": True}
-        return kb_search._format_cross_project_entry(
-            raw, "__global_search__" if args.global_search else reference_repo,
-        )
+        if not args.global_search and (not reference_repo or raw.get("repo") == reference_repo):
+            return raw
+        # Search scope is not applicability. A global/foreign hit must retain
+        # enough evidence to be checked without pretending it belongs here.
+        return {**raw, "_cross_project": True, "_evidence_lead": True,
+                "_from_project": raw.get("repo", ""),
+                "_warning": "Historical evidence from another scope; verify the current project, branch and authority before applying"}
 
     def annotate_domain(item: dict, raw: dict) -> None:
         if project_context and raw.get("domain"):
             entity_id = raw["domain"]["entity_id"]
+            project_context.check_history(entity_id)
+            if entity_id in project_context.history_links:
+                item["decision_history"] = project_context.history_links[entity_id][:4]
+            if as_of:
+                item["as_of"] = as_of.isoformat()
+                if project_context.eligible(raw):
+                    item["applicability_state"] = "historical_as_of"
+                observations = raw["domain"].get("observations")
+                if observations:
+                    from kb_timeline import view
+                    fields = view(observations, as_of, history_zone)
+                    lines, refs = [], []
+                    for field in fields:
+                        for event in field["observations"]:
+                            lines.append(f"{event['date']} {field['field']} ({field['status']}) {event['value']}")
+                            for ref in event["evidence_refs"]:
+                                if ref not in refs:
+                                    refs.append(ref)
+                    item["summary"] = _clip(" | ".join(lines), args.max_snippet_chars) if lines else "No confirmed observation by this date"
+                    item["evidence_refs"] = refs
             if entity_id in project_context.replaced:
                 item["superseded_in_scope_by"] = project_context.replaced[entity_id]
             if entity_id in project_context.uncertain_replacements:
                 item["applicability_state"] = "needs_review"
                 _append_warning(item, "A scoped replacement needs fresh evidence; do not assume this older requirement is current")
 
+    learned_alias_owners: set[str] = set()
+
+    @timed("retrieve.collect")
     def collect_batch(batch: dict[str, Any]) -> None:
         nonlocal rejected_count, rejected_nonactionable_count
         plan_index = int(batch["plan_index"])
@@ -1742,7 +2043,21 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
         variant_index = int(batch.get("variant_index") or 0)
         raw_results = batch["raw_results"]
         for raw_rank, raw in enumerate(raw_results):
-            if project_context and not project_context.eligible(raw, include_noncurrent=args.include_noncurrent):
+            count("retrieve.raw_candidate_visits")
+            locator_query = artifact_query or _has_query_text(
+                args.query, "映射", "路径", "目录", "位置", "在哪", "mapping", "locator", "location",
+            )
+            named_subtopic = _named_subtopic(raw, concrete_query_terms, reference_repo, reference_branch)
+            if not args.include_weak and not named_subtopic and not _topical_candidate(raw, concrete_query_terms, allow_paths=locator_query):
+                count("retrieve.rejected_task_topic")
+                rejected_count += 1
+                continue
+            if not args.include_weak and not named_subtopic and not locator_query and not _guidance_has_task_topic(raw, concrete_query_terms):
+                count("retrieve.rejected_guidance_topic")
+                rejected_count += 1
+                continue
+            if not args.include_weak and not _subject_compatible(raw, args.query, subjects, subject_topics):
+                count("retrieve.rejected_subject")
                 rejected_count += 1
                 continue
             if not args.include_noncurrent and _is_noncurrent(raw):
@@ -1799,6 +2114,9 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
                 rejected_count += 1
                 continue
 
+            if project_context and not project_context.eligible(raw, include_noncurrent=args.include_noncurrent):
+                rejected_count += 1
+                continue
             formatted = format_entry(raw)
 
             merged_terms = _query_terms(f"{args.query} {actual_query}")
@@ -1829,6 +2147,10 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
             if freshness_state in HARD_FRESHNESS_STATES and not args.include_noncurrent:
                 rejected_count += 1
                 continue
+            if (freshness_state == "fresh" and (raw.get("recall_checks") or {}).get("positive")
+                    and any(isinstance(alias, str) and alias.casefold() in literal_anchors
+                            for alias in raw.get("aliases", []))):
+                learned_alias_owners.add(entry_id)
             status_penalty = 2.0 if _is_noncurrent(raw) else 0.0
             heat_value = 0.0
             try:
@@ -1950,7 +2272,7 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
                 )
                 stderr_capture = io.StringIO()
                 stderr_context = contextlib.nullcontext() if args.debug else contextlib.redirect_stderr(stderr_capture)
-                with stderr_context:
+                with stderr_context, span("retrieve.search_expanded"):
                     raw_results, ctx = kb_search._search_once(
                         query=variant,
                         args=group_args,
@@ -1979,9 +2301,15 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
                 )
 
     if project_context:
-        related = project_context.related(set(candidates), limit=min(32, max(0, search_limit)),
-                                          include_noncurrent=args.include_noncurrent)
+        with span("retrieve.domain_related"):
+            related = project_context.related(set(candidates), limit=min(32, max(0, search_limit)),
+                                              include_noncurrent=args.include_noncurrent)
+            if args.search_in in ("kb", "all"):
+                related.extend(_linked_records(args.query, project_context, args.include_noncurrent))
         for raw, path in related:
+            if not args.include_weak and not _subject_compatible(raw, args.query, subjects, subject_topics):
+                count("retrieve.rejected_subject")
+                continue
             if allowed_kinds and raw.get("kind") not in allowed_kinds:
                 continue
             if not kb_search._matches_tags(raw, required_tags):
@@ -1994,6 +2322,8 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
                 continue
             if non_kb_maintenance_query and _is_personal_kb_runtime_entry(raw):
                 continue
+            if path["type"] == "conversation" and verify_once(raw)["state"] != "fresh":
+                continue
             entry_id = raw.get("id")
             if entry_id in candidates:
                 candidates[entry_id]["related_via"] = path
@@ -2005,14 +2335,19 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
             )
             item["related_via"] = path
             annotate_domain(item, raw)
-            item["query_groups"] = ["project-graph"]
-            item["why_matched"] = "evidenced project entity / one-hop relation: " + path["type"]
+            item["query_groups"] = ["linked-chat" if path["type"] == "conversation" else "project-graph"]
+            item["why_matched"] = "verified evidence link: " + path["type"]
             item["_score"] = 2.5 + _freshness_rank(item["freshness_state"])
             # Graph matches have a different basis from lexical confidence.
             item["retrieval_score"] = item["confidence"] = 0.8
             candidates[entry_id] = item
 
-    items = sorted(candidates.values(), key=lambda item: float(item.get("_score") or 0.0), reverse=True)
+    _prefer_learned_alias_to_repo_name(candidates, learned_alias_owners)
+    if project_context and not args.global_search:
+        project_context.prefer_local_versions(candidates)
+    items = sorted(candidates.values(), key=lambda item: (
+        item.get("related_via", {}).get("type") in {"dated_name", "entity_alias"}, float(item.get("_score") or 0.0)
+    ), reverse=True)
     for item in items:
         item.pop("_score", None)
     items, freshness_filtered_count = _filter_freshness_items(
@@ -2044,7 +2379,7 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
     payload = {
         "retrieval_id": retrieval_id,
         "query": args.query,
-        "session_id": str(getattr(args, "session_id", "") or "").strip(),
+        "session_id": runtime_session_id(getattr(args, "session_id", "")),
         "topic_id": str(getattr(args, "topic_id", "") or "").strip(),
         "query_chars": len(args.query),
         "hit_count": len(items),
@@ -2083,6 +2418,34 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
     if truncation:
         payload["truncation"] = truncation
     return payload
+
+
+def _brief_result(payload: dict[str, Any]) -> dict[str, Any]:
+    """Project an existing result. Never search again or change closeout candidates."""
+    if payload.get("error") or payload.get("receipt", {}).get("error"):
+        return payload
+    brief = {key: payload[key] for key in (
+        "retrieval_id", "query", "session_id", "topic_id", "mode", "repo", "hit_count",
+        "scope_anchors", "truncation", "project_view", "intent",
+    ) if key in payload}
+    context = payload.get("domain_context", {})
+    if context and (payload.get("project_view") or context.get("project_id") or context.get("state") == "ambiguous"
+                    or context.get("uncertain_replacement_count") or context.get("invalid_records")):
+        brief["domain_context"] = {key: value for key, value in context.items()
+                                   if key not in {"cache_hit", "indexed_records", "max_hops"}}
+    items = []
+    for hit in payload["items"]:
+        item = {key: hit[key] for key in (
+            "entry_id", "kind", "title", "summary", "repo", "branch", "freshness_state",
+            "freshness_scope", "trust_tier", "applicability_state", "warning", "domain", "superseded_in_scope_by",
+            "evidence_refs", "as_of", "related_via", "decision_history",
+        ) if hit.get(key)}
+        sources = hit.get("source_paths") or hit.get("key_files") or []
+        if sources:
+            item["source_paths"] = sources[:1]
+        items.append(item)
+    brief["items"] = items
+    return brief
 
 
 def _print_markdown(payload: dict[str, Any]) -> None:
@@ -2152,18 +2515,22 @@ def main(argv: list[str]) -> int:
         "--scope-anchor",
         action="append",
         default=[],
-        help="Optional repeatable scope anchor; its value must occur in the query",
+        help="Object named in the task or selected question; keep it in a focused lookup",
     )
     parser.add_argument(
         "--receipt-output",
         default="",
         help="Explicitly write the compact retrieval result to this JSON file",
     )
+    intent = parser.add_mutually_exclusive_group()
+    intent.add_argument("--focus", help="Independent historical question within the larger task")
+    intent.add_argument("--action", help="Concrete upcoming operation and client/environment")
     parser.add_argument("--session-id", default="", help="Caller session identifier")
     parser.add_argument("--topic-id", default="", help="Independent topic identifier")
     parser.add_argument("--repo", default="", help="Override repo bucket")
     parser.add_argument("--branch", default="", help="Override branch bucket")
     parser.add_argument("--project-id", default="", help="Resolve this evidenced domain project ID")
+    parser.add_argument("--as-of", default="", help="Evaluate dated domain records and replacement edges at this period or offset timestamp")
     parser.add_argument("--environment", default="", help="Domain applicability environment")
     parser.add_argument("--no-domain", action="store_true", help="Use the legacy lexical path without domain lookup")
     parser.add_argument("--project-view", action="store_true", help="Include a bounded current project view")
@@ -2196,6 +2563,7 @@ def main(argv: list[str]) -> int:
         action="store_true",
         help="Treat runtime/storage unavailability as an empty, non-retryable result",
     )
+    parser.add_argument("--brief", action="store_true", help="Return decision fields and closeout identity as compact JSON")
     parser.add_argument("--json", action="store_true", help="Output JSON instead of compact text")
     try:
         args = parser.parse_args(argv)
@@ -2206,7 +2574,7 @@ def main(argv: list[str]) -> int:
             message=str(exc), error_code="invalid_request",
         )
         options = argv[:argv.index("--")] if "--" in argv else argv
-        if "--json" in options:
+        if "--json" in options or "--brief" in options:
             sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
         else:
             parser.print_usage(sys.stderr)
@@ -2215,7 +2583,23 @@ def main(argv: list[str]) -> int:
 
     return_code = 0
     try:
+        task_query = args.query
+        selected = args.action if args.action is not None else args.focus
+        if selected is not None:
+            if not selected.strip():
+                raise ValueError("focused lookup needs a concrete question or action")
+            args.query = selected.strip()
+            # The focus can say "that device" while the task names it. Carry only
+            # caller-selected objects actually present in the task or the focus.
+            for anchor in args.scope_anchor:
+                value = _scope_anchor_value(anchor)
+                if value.casefold() not in args.query.casefold():
+                    _validate_scope_anchors(task_query, [anchor])
+                    args.query += " " + value
         payload = build_context(args)
+        if selected is not None:
+            payload["task_query"] = task_query
+            payload["intent"] = "action" if args.action is not None else "focus"
     except (ValueError, JsonlSafetyError, OSError, RuntimeError, KeyError, TypeError) as exc:
         if isinstance(exc, JsonlSafetyError):
             error_code, return_code = "data_corruption", 5
@@ -2233,10 +2617,10 @@ def main(argv: list[str]) -> int:
             message=str(exc), error_code=error_code,
             status="unavailable" if error_code == "runtime_unavailable" else "error",
         )
-        if not args.json or error_code != "runtime_unavailable":
+        if not (args.json or args.brief) or error_code != "runtime_unavailable":
             sys.stderr.write(f"error: {error_code}: {exc}\n")
 
-    payload.update(session_id=args.session_id.strip(), topic_id=args.topic_id.strip(), query_chars=len(args.query))
+    payload.update(session_id=runtime_session_id(args.session_id), topic_id=args.topic_id.strip(), query_chars=len(args.query))
     try:
         _write_receipt(args.receipt_output, payload)
     except (OSError, ValueError) as exc:
@@ -2252,7 +2636,9 @@ def main(argv: list[str]) -> int:
         sys.stderr.write(f"error: cannot write --receipt-output: {exc}\n")
         return_code = 5
 
-    if args.json:
+    if args.brief:
+        sys.stdout.write(json.dumps(_brief_result(payload), ensure_ascii=False, separators=(",", ":")) + "\n")
+    elif args.json:
         sys.stdout.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
     elif "error" not in payload:
         _print_markdown(payload)

@@ -182,6 +182,7 @@ def _main(argv: list[str]) -> int:
     up.add_argument("--story", default=None, help="Update story")
     up.add_argument("--file", dest="story_file", default="", help="Read story from a UTF-8 file")
     up.add_argument("--tags", default=None, help="Replace tags (comma-separated)")
+    up.add_argument("--observation-file", help="Append evidenced dated facts from a JSON object or array")
     up.add_argument("--expected-rev", default="", help="Reject the update unless the current record_rev matches")
     up.add_argument("--refresh-evidence", action="store_true", help="Recapture evidence snapshots after reviewing current files")
     up.add_argument("--repo", default="", help="Override repo bucket")
@@ -305,6 +306,14 @@ def _main(argv: list[str]) -> int:
                     return 2
             if args.tags is not None:
                 entry["tags"] = [tag.strip() for tag in args.tags.split(",") if tag.strip()]
+
+            if args.observation_file:
+                from kb_timeline import append_file
+                try:
+                    append_file(entry, args.observation_file)
+                except (ValueError, OSError) as exc:
+                    sys.stderr.write(f"Invalid observation input: {exc}\n")
+                    return 2
 
             immutable_fields = {
                 "id", "ts", "repo", "branch", "branch_dir", "workspace_dir",
