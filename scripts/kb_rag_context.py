@@ -29,6 +29,7 @@ from kb_timing import count, span, timed
 import kb_evidence
 import kb_domain
 import kb_project_view
+import kb_project_routing
 from kb_kinds import VALID_KINDS, parse_kind_filter, parse_legacy_type_filter
 from kb_lib import (
     JsonlSafetyError,
@@ -1781,6 +1782,59 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
     scope_anchors = [str(value).strip() for value in (getattr(args, "scope_anchor", []) or []) if str(value).strip()]
     _validate_scope_anchors(args.query, scope_anchors)
 
+    original_query = args.query
+    clean_query, link_titles = kb_project_routing.chat_titles(original_query)
+    if link_titles and not getattr(args, "no_domain", False):
+        args = argparse.Namespace(**vars(args))
+        args.query = clean_query
+    as_of = None
+    period = getattr(args, "as_of", "")
+    if not period and not getattr(args, "no_domain", False) and any(
+            word in args.query for word in ("当时", "截至", "那天", "那一天")) and not any(
+            word in args.query for word in ("现在", "如今", "目前")):
+        dates = re.findall(r"(?<!\d)(\d{4})\s*[-年]\s*(\d{1,2})\s*[-月]\s*(\d{1,2})(?!\d)", args.query)
+        if len(dates) == 1:
+            year, month, day = map(int, dates[0])
+            period = f"{year:04d}-{month:02d}-{day:02d}"
+    if period:
+        from kb_timeline import bounds
+        from zoneinfo import ZoneInfo
+        if args.no_domain:
+            raise ValueError("--as-of requires domain history")
+        history_zone = ZoneInfo("Asia/Shanghai")
+        as_of = bounds(period, history_zone)[1]
+    evidence_cache: dict[str, dict[str, Any]] = {}
+
+    def verify_once(entry: dict) -> dict:
+        key = str(entry.get("id") or "")
+        if key not in evidence_cache:
+            count("evidence.entry_cache_misses")
+            evidence_cache[key] = _safe_evidence_verification(entry)
+        else:
+            count("evidence.entry_cache_hits")
+        return evidence_cache[key]
+
+    synonyms = load_synonyms()
+    explicit_repo = args.repo
+    graph = None
+    routing = {}
+    if not getattr(args, "no_domain", False):
+        graph = kb_domain.load_graph()
+        if not (period or args.project_id):
+            with span("retrieve.project_routing"):
+                routing = kb_project_routing.suggest(
+                    original_query, graph, cwd=None if args.global_search else Path.cwd(),
+                    files=getattr(args, "current_file", ()), verify=verify_once, synonyms=synonyms,
+                    scope={"repo_id": explicit_repo, "branch": args.branch, "environment": args.environment},
+                )
+            if routing.get("state") == "use" and not (args.global_search or explicit_repo):
+                selected = routing["candidates"][0]
+                # Route only this read. A repository choice is not a graph edge
+                # and does not authorize writes or assert historical applicability.
+                args = argparse.Namespace(**vars(args))
+                args.repo = selected["repo"]
+                args.branch = args.branch or kb_project_routing.search_branch(selected, graph)
+
     allowed_kinds = _parse_allowed_kinds(args.kind_filter, args.legacy_type_filter)
     config = load_config()
     expand_requested = bool(args.expand or config.get("search", {}).get("expand_queries", False))
@@ -1804,7 +1858,6 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
         minimum=0,
         maximum=5,
     )
-    synonyms = load_synonyms()
     is_kb_runtime_query = _is_kb_runtime_query(args.query)
     non_kb_maintenance_query = _is_non_kb_maintenance_query(args.query)
     artifact_query = _is_artifact_query(args.query)
@@ -1951,40 +2004,14 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
             }
         )
 
-    evidence_cache: dict[str, dict[str, Any]] = {}
-
-    def verify_once(entry: dict) -> dict:
-        key = str(entry.get("id") or "")
-        if key not in evidence_cache:
-            count("evidence.entry_cache_misses")
-            evidence_cache[key] = _safe_evidence_verification(entry)
-        else:
-            count("evidence.entry_cache_hits")
-        return evidence_cache[key]
-
     project_context = None
-    as_of = None
-    period = getattr(args, "as_of", "")
-    if not period and not getattr(args, "no_domain", False) and any(
-            word in args.query for word in ("当时", "截至", "那天", "那一天")) and not any(
-            word in args.query for word in ("现在", "如今", "目前")):
-        dates = re.findall(r"(?<!\d)(\d{4})\s*[-年]\s*(\d{1,2})\s*[-月]\s*(\d{1,2})(?!\d)", args.query)
-        if len(dates) == 1:
-            year, month, day = map(int, dates[0])
-            period = f"{year:04d}-{month:02d}-{day:02d}"
-    if period:
-        from kb_timeline import bounds
-        from zoneinfo import ZoneInfo
-        if args.no_domain:
-            raise ValueError("--as-of requires domain history")
-        history_zone = ZoneInfo("Asia/Shanghai")
-        as_of = bounds(period, history_zone)[1]
     if not getattr(args, "no_domain", False):
         with span("retrieve.domain_init"):
             project_context = kb_project_view.ProjectContext(
                 args.query, repo=reference_repo or args.repo, branch=reference_branch,
                 environment=getattr(args, "environment", ""),
                 project_id=getattr(args, "project_id", ""), verify=verify_once, as_of=as_of,
+                graph=graph, clarify=not explicit_repo and routing.get("state") == "clarify",
             )
 
     def format_entry(raw: dict) -> dict:
@@ -2305,7 +2332,14 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
             related = project_context.related(set(candidates), limit=min(32, max(0, search_limit)),
                                               include_noncurrent=args.include_noncurrent)
             if args.search_in in ("kb", "all"):
-                related.extend(_linked_records(args.query, project_context, args.include_noncurrent))
+                related.extend(_linked_records(original_query, project_context, args.include_noncurrent))
+                if routing.get("state") == "use":
+                    chosen = routing["candidates"][0]
+                    owner = project_context.entities.get(chosen.get("entity_id") or chosen.get("project_id"))
+                    name = chosen.get("matched_name", "")
+                    if (owner and name and args.query.strip(" 。？！?!").casefold() == name.casefold()
+                            and project_context.eligible(owner) and project_context.current(owner)):
+                        related.append((owner, {"type": "project_name", "name": name}))
         for raw, path in related:
             if not args.include_weak and not _subject_compatible(raw, args.query, subjects, subject_topics):
                 count("retrieve.rejected_subject")
@@ -2346,7 +2380,7 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
     if project_context and not args.global_search:
         project_context.prefer_local_versions(candidates)
     items = sorted(candidates.values(), key=lambda item: (
-        item.get("related_via", {}).get("type") in {"dated_name", "entity_alias"}, float(item.get("_score") or 0.0)
+        item.get("related_via", {}).get("type") in {"dated_name", "entity_alias", "project_name"}, float(item.get("_score") or 0.0)
     ), reverse=True)
     for item in items:
         item.pop("_score", None)
@@ -2378,7 +2412,7 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
 
     payload = {
         "retrieval_id": retrieval_id,
-        "query": args.query,
+        "query": original_query,
         "session_id": runtime_session_id(getattr(args, "session_id", "")),
         "topic_id": str(getattr(args, "topic_id", "") or "").strip(),
         "query_chars": len(args.query),
@@ -2391,6 +2425,8 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
         "items": items,
         "runtime": runtime_scope(),
     }
+    if routing:
+        payload["project_routing"] = routing
     if project_context:
         payload["domain_context"] = project_context.payload()
         if getattr(args, "project_view", False):
@@ -2426,7 +2462,7 @@ def _brief_result(payload: dict[str, Any]) -> dict[str, Any]:
         return payload
     brief = {key: payload[key] for key in (
         "retrieval_id", "query", "session_id", "topic_id", "mode", "repo", "hit_count",
-        "scope_anchors", "truncation", "project_view", "intent",
+        "scope_anchors", "truncation", "project_view", "project_routing", "intent",
     ) if key in payload}
     context = payload.get("domain_context", {})
     if context and (payload.get("project_view") or context.get("project_id") or context.get("state") == "ambiguous"
@@ -2455,6 +2491,8 @@ def _print_markdown(payload: dict[str, Any]) -> None:
     query_groups = payload.get("query_groups") or []
     group_names = [group.get("name") for group in query_groups if isinstance(group, dict) and group.get("name")]
     rejected_weak = payload.get("rejected_weak_count", 0)
+    if payload.get("project_routing"):
+        sys.stdout.write("KB_PROJECT_ROUTING " + json.dumps(payload["project_routing"], ensure_ascii=False) + "\n")
     if payload.get("domain_context", {}).get("state") in {"resolved", "ambiguous"}:
         sys.stdout.write("KB_PROJECT_CONTEXT " + json.dumps(payload["domain_context"], ensure_ascii=False) + "\n")
     suffix = ""
@@ -2529,6 +2567,8 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--topic-id", default="", help="Independent topic identifier")
     parser.add_argument("--repo", default="", help="Override repo bucket")
     parser.add_argument("--branch", default="", help="Override branch bucket")
+    parser.add_argument("--current-file", "--active-file", action="append", default=[],
+                        help="File currently in use, relative to the caller or absolute (up to four)")
     parser.add_argument("--project-id", default="", help="Resolve this evidenced domain project ID")
     parser.add_argument("--as-of", default="", help="Evaluate dated domain records and replacement edges at this period or offset timestamp")
     parser.add_argument("--environment", default="", help="Domain applicability environment")

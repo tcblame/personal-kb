@@ -164,22 +164,38 @@ def load_graph(*, rebuild: bool = False) -> dict:
         try:
             data = json.loads(cache.read_text(encoding="utf-8"))
             if (isinstance(data, dict) and isinstance(data.get("entries"), list)
-                    and data.get("signature") == signature and data.get("schema") == "personal-kb.domain-index/v1"):
+                    and isinstance(data.get("routing_rows"), list) and data.get("signature") == signature and data.get("schema") == "personal-kb.domain-index/v2"):
                 return {**data, "cache_hit": True}
         except (ValueError, UnicodeError):
             pass  # Derived cache only; rebuild in memory, without writing on reads.
     entries = []
+    routing_rows = []
     invalid_count = 0
     for path in files:
         for entry in read_jsonl(path):
-            if "domain" not in entry:
-                continue
-            if domain_errors(entry):
-                invalid_count += 1
-            else:
+            d = entry.get("domain", {})
+            if "domain" in entry:
+                if domain_errors(entry):
+                    invalid_count += 1
+                    continue
                 entries.append(entry)
-    data = {"schema": "personal-kb.domain-index/v1", "signature": signature,
-            "entries": entries, "invalid_count": invalid_count, "cache_hit": False}
+            repo = entry.get("repo")
+            if (not isinstance(repo, str) or not repo or repo.startswith("_") or not isinstance(entry.get("title"), str) or
+                    entry.get("_deleted") or entry.get("_archived") or entry.get("superseded_by") or
+                    str(entry.get("status") or "") not in CURRENT):
+                continue
+            row = {k: entry[k] for k in ("id", "repo", "branch", "workspace_dir", "title",
+                                         "aliases", "trigger_terms") if k in entry}
+            for field in ("aliases", "trigger_terms"):
+                values = row.get(field)
+                if not isinstance(values, list):
+                    values = [values]
+                row[field] = [v for v in values if isinstance(v, str) and v.strip()]
+            if d:
+                row.update(project_id=d["project_id"], entity_id=d["entity_id"])
+            routing_rows.append(row)
+    data = {"schema": "personal-kb.domain-index/v2", "signature": signature,
+            "entries": entries, "routing_rows": routing_rows, "invalid_count": invalid_count, "cache_hit": False}
     if rebuild:
         cache.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temporary = tempfile.mkstemp(prefix=".domain-", dir=cache.parent)

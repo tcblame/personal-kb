@@ -384,6 +384,79 @@ class DomainTests(unittest.TestCase):
         Path(other["source_paths"][0]).write_text("Evidence needs recheck")
         self.assertEqual(self.query()["domain_context"]["state"], "ambiguous")
 
+    def routed(self, query, *opts):
+        code, out, err = self.call("retrieve", query, "--brief", *map(str, opts))
+        self.assertEqual(code, 0, err)
+        return json.loads(out)
+
+    def test_active_file_in_unregistered_checkout_can_supply_all_feature_evidence(self):
+        remote = self.base / "output" / "wayfinder"
+        remote.mkdir(parents=True)
+        (remote / "pyproject.toml").write_text("[project]\n")
+        current = remote / "logic.py"
+        current.write_text("# tide_window gateway_queue\n")
+        result = self.routed("请完善 tide_window 和 gateway_queue", "--current-file", current.relative_to(self.base))
+        route = result["project_routing"]
+        self.assertEqual((route["state"], route["candidates"][0]["repo"]), ("use", "wayfinder"))
+        self.assertEqual({x["source"] for x in route["candidates"][0]["features"]}, {str(current)})
+        self.assertEqual(result["repo"], "wayfinder")
+        self.assertEqual(result["items"], [])
+        self.assertNotIn("project_id", route["candidates"][0])
+
+    def test_open_files_with_competing_projects_leave_a_real_choice(self):
+        files = []
+        for name in ("north-terminal", "south-terminal"):
+            root = self.base / name
+            root.mkdir()
+            (root / "pyproject.toml").write_text("[project]\n")
+            file = root / "feature.md"
+            file.write_text("raster_preview palette_table\n")
+            files.append(file)
+        options = [arg for file in files for arg in ("--current-file", file)]
+        result = self.routed("修改 raster_preview 和 palette_table", *options)
+        routing = result["project_routing"]
+        self.assertEqual(routing["state"], "clarify")
+        self.assertEqual({c["repo"] for c in routing["candidates"]}, {"north-terminal", "south-terminal"})
+        self.assertIn("其他", routing["question"])
+        self.assertFalse(result.get("domain_context", {}).get("project_id"))
+        self.assertNotIn("project_routing", self.routed("浅拷贝是什么意思？", *options))
+        code, text, _ = self.call("retrieve", "修改 raster_preview 和 palette_table", *map(str, options))
+        self.assertEqual(code, 0)
+        self.assertIn("KB_PROJECT_ROUTING", text)
+        self.assertNotIn("project_routing", self.routed("raster_preview palette_table", "--no-domain", *options))
+
+    def test_family_offers_only_linked_current_children(self):
+        for key, name, state in (("north", "北线灯塔", "confirmed"), ("south", "南线灯塔", "confirmed"),
+                                 ("old", "西线灯塔", "candidate")):
+            e = self.row(key, "component", "map", aliases=[name, key], state=state,
+                         relations=[self.edge("belongs_to", "p")])
+            self.save(e)
+        result = self.routed("灯塔系统要选哪个子项目？")["project_routing"]
+        self.assertEqual(result["state"], "clarify")
+        self.assertEqual({c["entity_id"] for c in result["candidates"]}, {"north", "south"})
+        member = self.routed("北线灯塔")["project_routing"]
+        self.assertEqual((member["state"], member["candidates"][0]["entity_id"]), ("use", "north"))
+        self.assertEqual(member["candidates"][0]["parent_label"], "灯塔系统")
+
+    def test_qualified_names_respect_context_and_withdrawal(self):
+        ref = [{"type": "conversation", "value": "Explicit project spelling in fixture"}]
+        for value in ("研修助手", "期末答辩"):
+            event = {"field": "project_alias", "value": value, "basis": "observed", "state": "confirmed",
+                     "date": "2026-01-01", "evidence_refs": ref}
+            self.project["domain"].setdefault("observations", []).append(event)
+        self.project["domain"]["observations"].append({**event, "value": "去年的名称", "basis":"ended"})
+        path = self.root / "records/backend/main/kb.jsonl"
+        path.write_text(json.dumps(self.project, ensure_ascii=False) + "\n", encoding="utf-8")
+        bare = self.routed("研修助手")
+        self.assertEqual(bare["project_routing"]["state"], "use")
+        self.assertEqual(bare["items"][0]["entry_id"], self.project["id"])
+        self.assertNotIn("project_routing", self.routed("我的期末答辩开场白怎么讲？"))
+        self.assertNotIn("project_routing", self.routed("去年的名称"))
+        self.assertNotIn("project_routing", self.routed("研修助手", "--as-of", "2025-12-20"))
+        code, result, _ = self.call("retrieve", "研修助手", "--brief", *(["--current-file", "file.py"] * 5))
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(result)["error"]["code"], "invalid_request")
+
 
 def main():
     result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(DomainTests))

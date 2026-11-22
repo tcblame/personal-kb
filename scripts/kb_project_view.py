@@ -20,8 +20,10 @@ def mentions(query: str, value: str) -> bool:
 
 class ProjectContext:
     def __init__(self, query: str, *, repo: str, branch: str, environment: str,
-                 project_id: str, verify: Callable[[dict], dict], as_of: datetime | None = None):
-        graph = kb_domain.load_graph()
+                 project_id: str, verify: Callable[[dict], dict], as_of: datetime | None = None,
+                 graph: dict | None = None, clarify: bool = False):
+        if graph is None:
+            graph = kb_domain.load_graph()
         self.graph = graph
         self.query = query
         self.verify = verify
@@ -45,7 +47,9 @@ class ProjectContext:
             self.matches = sorted(key for key, e in self.projects.items()
                                   if any(mentions(query, str(name))
                                          for name in [key, *e.get("aliases", [])]))
-            if not self.matches and repo:
+            if clarify and len(self.matches) == 1:
+                self.matches = []
+            if not self.matches and repo and not clarify:
                 self.matches = sorted({e["domain"]["project_id"] for e in self.entities.values()
                                        if e["domain"]["entity_type"] == "repository" and e["domain"].get("repo_id") == repo
                                        and self.current(e) and self._current_project(e["domain"]["project_id"])})

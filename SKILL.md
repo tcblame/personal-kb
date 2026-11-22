@@ -80,8 +80,12 @@ Retrieve with:
 
 ```bash
 python3 <skill-root>/scripts/kb.py retrieve \
-  "<task plus project, module, path, config, error, table, or durable business anchor>" --limit 5
+  "<task plus project, module, path, config, error, table, or durable business anchor>" --limit 5 --brief
 ```
+
+Run retrieval from the task's working directory. Pass the actual active or mentioned project file with `--current-file PATH` when it is available. Include the user's functional description and their own wording. For `project_routing.state=use`, use the selected project for this lookup and check the pointers before applying its history. For `clarify`, show the best one to three choices, briefly explain the matching function or location, and leave room for another project or an independent topic. Ask before taking project-specific action. A choice applies to this conversation. Record a permanent name or relationship when the user states it or a source establishes it. A broad term alone can warrant an ordinary answer. When different words describe the same workflow, compare the visible file and the candidates' sources before deciding whether to ask.
+
+Windows callers can use the configured [WSL runtime mapping](references/local-runtime.md) to pass the working file to the same installed Skill.
 
 Default retrieval is read-only. Do not update search counts, rebuild indexes, refresh aggregations, or include non-current records during ordinary work. Use `kb_search.py` only for full-record inspection, recall debugging, migration, normalization, or explicit corpus audit.
 

@@ -15,6 +15,14 @@ Read this file when configuring the Skill, changing storage locations, or decidi
 
 `repo`, `branch`, and `kind` are logical fields below `records`. They are useful for ranking and filtering but do not create separate data sources. `storage.root` may be selected with `PERSONAL_KB_ROOT`; a complete config may be selected with `PERSONAL_KB_CONFIG`. A configured child must be a relative path that stays below the root.
 
+## Project selection in conversation
+
+Pass an absolute path or a path relative to the task cwd using `--current-file` (also `--active-file`). Supply up to four actual files, including a document outside the cwd when that is the one under discussion. The CLI sees the cwd and the supplied paths. The host supplies the editor selection. Only local project markers, bounded text from those files and selected project overviews, and vocabulary from current KB rows contribute to ranking.
+
+Full JSON, brief JSON, and text output surface the same decision. `project_routing.candidates` lists names with their location, matched words and source pointers. A dated `project_alias` records a user-confirmed colloquial name with an evidence reference. Short ambiguous names and dictionary equivalents can nominate a project for review. An evidenced `belongs_to` relation identifies a subsystem. New working directories can provide a candidate before any KB entry exists. A clear choice sets the read scope for the current lookup. An ambiguous result includes a question and up to three candidates, including substantiated siblings. Use the original wording in the question and offer an independent topic when appropriate. `items` and their freshness still govern whether any historical fact applies.
+
+An explicit repository, branch or project ID keeps the caller's scope. `--as-of` uses the existing dated lookup. `--no-domain` selects the legacy lexical path. A `--global` lookup can return candidates while continuing to search globally.
+
 ## Daily wrapper
 
 Run from the installed Skill directory or substitute its absolute path for `<skill-root>`:

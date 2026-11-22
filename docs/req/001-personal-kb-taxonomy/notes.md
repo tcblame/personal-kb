@@ -59,3 +59,9 @@ The slice supplies domain semantics, explicit relationships, and retrieval. It d
 not yet provide reliable host hooks, automatic capture of all changes, arbitrary
 graph traversal, complete project inventory, or proven long-term self-evolution.
 See [the runtime contract](../../../references/domain-model.md).
+
+## 2026-11-22 workspace and feature evidence for project selection
+
+The daily retrieval command now accepts a current file and exposes a bounded project decision in brief, full, and text output. It consults project names, existing record vocabulary, the task directory, and local project files. An ambiguous or conflicting match can be shown to the user before acting. A single choice stays in conversation unless independent evidence establishes a durable name or relationship. The public project/component schema and the bidirectional synonym table continue to supply their respective evidence.
+
+On November 22 the installed version met the expected project decision on 13 of 13 actual user turns, compared with 3 of 13 before the change. Four lookups also returned historical items. Tests for new projects, active files, confirmed children, general questions and existing historical scopes passed. Run `python3 scripts/kb_domain_test.py` for the portable fixtures covering file evidence, competing projects, linked children and the withdrawal of a project name.
