@@ -9,6 +9,7 @@ from typing import Any, Callable
 
 import kb_domain
 import kb_evidence
+from kb_timeline import exact_alias
 
 
 # Chinese prose can touch a ticket number. ASCII suffixes and dotted
@@ -95,15 +96,17 @@ class ProjectContext:
     def _exact_source_locator(self) -> dict | None:
         codes = {code.casefold() for code in _TICKET.findall(self.query)}
         repo, branch = self.scope["repo_id"], self.scope["branch"]
-        if len(codes) != 1 or not repo or not branch or self.state == "ambiguous":
+        if len(codes) > 1 or not repo or not branch or self.state == "ambiguous" or (not codes and self.as_of):
             return None
-        code = codes.pop()
         owners = []
         for entry in self.graph["entries"]:
             if entry.get("repo") != repo or entry.get("branch") != branch:
                 continue
-            names = [entry["domain"]["entity_id"], *entry.get("aliases", [])]
-            name = next((name for name in names if str(name).casefold() == code), None)
+            if codes:
+                names = [entry["domain"]["entity_id"], *entry.get("aliases", [])]
+                name = next((name for name in names if str(name).casefold() in codes), None)
+            else:
+                name = exact_alias(entry, self.query)
             if name:
                 owners.append((entry, name))
         if len(owners) != 1:
@@ -146,7 +149,7 @@ class ProjectContext:
             "locator_evidence": states, "source_paths": paths[:3], "summary": "",
             "applicability_state": "locate_only", "trust_tier": "recheck", "freshness_state": "needs_recheck",
             "freshness_scope": "local_head", "confidence": 1.0, "retrieval_score": 1.0,
-            "why_matched": "Exact identifier in the requested repository and branch",
+            "why_matched": "Exact owner name or identifier in the requested repository and branch",
             "warning": "仅用于定位。请打开来源，核对目标日期、分支与实施状态后再作判断。",
             **({"source_at_commit": source_at_commit} if source_at_commit else {}),
             **({"as_of": self.as_of.isoformat()} if self.as_of else {}),

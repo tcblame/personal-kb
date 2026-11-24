@@ -123,3 +123,5 @@ a target record already existed before calling it missed_recall. The stats JSON
 counts reported stages by unique closeout ID. Missing feedback is unknown.
 
 When a maintained record has a confirmed `supersedes` edge, closeout derives `replacement_links` from the stored owner. The event keeps the predecessor, successor, scope and effective time for later review. A separate release document can be the evidence for such a change.
+
+An optional `adoption_evidence` object maps an ID already declared under an adoption effect to one short, single-line outcome pointer (up to 320 characters). For example, `{"entry-1":"delivered checklist, item 3: verified the target checkout before applying the rule"}` lets a reviewer find the observed action. A locator may cite where its source was opened. Include a pointer only when the outcome can be inspected. Earlier closeouts without this field have unknown outcome evidence. Record a verified missed or late action under the existing `memory_gap` fields.

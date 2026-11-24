@@ -722,6 +722,15 @@ def build_closeout(args: argparse.Namespace) -> dict[str, Any]:
         closeout["hit_entry_ids"] = hit_entry_ids
     if telemetry_present:
         closeout["retrieval_items"] = retrieval_items
+    pointers = payload.get("adoption_evidence")
+    if pointers is not None:
+        if not isinstance(pointers, dict) or any(
+            entry_id not in adopted or not isinstance(pointer, str) or not pointer.strip()
+            or len(pointer) > 320 or len(pointer.splitlines()) != 1 for entry_id, pointer in pointers.items()
+        ):
+            raise ValueError("each adoption_evidence pointer must be one short line for a declared adopted entry")
+        if pointers:
+            closeout["adoption_evidence"] = {entry_id: pointer.strip() for entry_id, pointer in pointers.items()}
     if rejected_hit_ids:
         closeout["rejected_hit_ids"] = rejected_hit_ids
     gap = payload.get("memory_gap")

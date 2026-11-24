@@ -56,6 +56,22 @@ class CloseoutContractTests(unittest.TestCase):
         self.assertEqual(self.call(payload), (0, "", ""))
         self.assertEqual(self.rows()[0]["memory_review"], payload["memory_review"])
 
+    def test_outcome_pointer_is_optional_and_requires_declared_adoption(self):
+        from kb_lib import append_jsonl
+        append_jsonl(self.root / "records/fixture/main/kb.jsonl", {
+            "id": "found", "title": "fixture authority", "kind": "map", "repo": "fixture", "branch": "main",
+        })
+        receipt = {"retrieval_id": "r-outcome", "items": [{"entry_id": "found", "applicability_state": "locate_only"}]}
+        payload = {"retrieval_snapshot": receipt, "adoption_effects": {"locate": ["found"]},
+                   "adoption_evidence": {"found": "review checklist, item 2"}}
+        self.assertEqual(self.call(payload, "--repo", "fixture", "--branch", "main"), (0, "", ""))
+        self.assertEqual(self.rows()[0]["adoption_evidence"], payload["adoption_evidence"])
+        for invalid in ({"other": "checklist"}, {"found": " "}, {"found": "a\nb"}, {"found": "x" * 321}, []):
+            with self.subTest(invalid=invalid):
+                self.assertNotEqual(self.call({**payload, "adoption_evidence": invalid})[0], 0)
+        self.assertNotEqual(self.call({**payload, "adoption_effects": {}, "skipped_reason": "telemetry only"})[0], 0)
+        self.assertEqual(len(self.rows()), 1)
+
     def test_unknown_memory_disposition_fails_before_append(self):
         code, _, _ = self.call({"skipped_reason": "maintenance", "memory_review": {"disposition": "made_up", "reason": "x"}})
         self.assertNotEqual(code, 0)

@@ -6,6 +6,7 @@ import copy
 import io
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stdout, redirect_stderr
@@ -238,6 +239,65 @@ class DomainTests(unittest.TestCase):
         authority.write_text("changed ticket evidence")
         self.save(self.row("another", "requirement", "requirement", aliases=["T022"]))
         self.assertEqual(lookup(), [])
+
+    def test_changed_exact_alias_requires_an_active_unique_owner(self):
+        name = "独立预约和设备映射"
+        item = self.row("appointment", "requirement", "requirement", aliases=[name])
+        self.save(item)
+        Path(self.project["source_paths"][0]).write_text("project authority changed")
+        self.assertEqual(self.query(name)["items"][0]["applicability_state"], "locate_only")
+        for q, args in [(name[:4], []), (name, ["--branch", "sibling"]), (name, ["--as-of", "2026-01-02"])]:
+            with self.subTest(q=q, args=args):
+                self.assertEqual(self.query(q, *args)["items"], [])
+        self.save(self.row("second", "requirement", "requirement", aliases=[name]))
+        self.assertEqual(self.query(name)["items"], [])
+
+    def test_dated_alias_respects_withdrawal_end_and_future_confirmation(self):
+        from kb_timeline import event_id, exact_alias
+        name = "日常资料目录"
+        owner = self.row("folder", "component", "map", aliases=[name])
+        confirmed = {"field": "alias", "value": name, "date": "2024-01-01",
+                     "state": "confirmed", "basis": "effective"}
+        owner["domain"]["observations"] = [confirmed]
+        self.assertEqual(exact_alias(owner, name + "？"), name)
+        for history in [
+            [confirmed, {**confirmed, "basis": "ended", "date": "2024-03-01"}],
+            [confirmed, {**confirmed, "withdraws": event_id(confirmed)}],
+            [{**confirmed, "state": "candidate"}], [{**confirmed, "date": "2999-01-01"}],
+        ]:
+            with self.subTest(history=history):
+                owner["domain"]["observations"] = history
+                self.assertIsNone(exact_alias(owner, name))
+
+    def test_global_folder_locator_rechecks_git_checkout_and_branch(self):
+        checkout = self.base / "lantern"
+        checkout.mkdir()
+        def git(*args):
+            subprocess.run(["git", "-C", str(checkout), *args], check=True, capture_output=True)
+        git("init", "-b", "main")
+        authority = checkout / "README.md"
+        authority.write_text("original project authority")
+        git("add", "README.md")
+        git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "fixture")
+        name = "灯塔素材目录"
+        project = self.row("lantern-project", "project", "map", project="lantern-project", repo="lantern", aliases=[name])
+        project.update(workspace_dir=str(checkout), source_paths=[str(authority)])
+        project["evidence_snapshots"] = kb_evidence.capture_evidence_snapshots(project, checkout)
+        project["record_rev"] = kb_evidence.canonical_entry_revision(project)
+        self.save(project)
+        authority.write_text("new uncommitted rule")
+        def global_lookup(query):
+            code, output, err = self.call("retrieve", query, "--global", "--brief", "--no-session-briefs")
+            self.assertEqual(code, 0, err)
+            return json.loads(output)["items"]
+        self.assertEqual(global_lookup(name), [])
+        git("add", "README.md")
+        git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "revised authority")
+        card = global_lookup(name)[0]
+        self.assertEqual((card["workspace_dir"], card["applicability_state"]), (str(checkout), "locate_only"))
+        self.assertFalse(card.get("summary"))
+        git("switch", "-c", "other")
+        self.assertFalse(any(i.get("workspace_dir") for i in global_lookup(name)))
 
     def test_ticket_locator_respects_fresh_and_uncertain_replacements(self):
         self.save(self.row("ticket", "requirement", "requirement", aliases=["T022"]))

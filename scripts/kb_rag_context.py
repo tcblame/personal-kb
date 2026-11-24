@@ -2041,6 +2041,19 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
                 and bool((explicit_repo and args.branch) or local_scope),
             )
     locator = project_context.locator if project_context else None
+    # A global lookup can name one specific project folder. The checkout proves
+    # its location only. Keep global ranking and authority if no safe locator exists.
+    if project_context and args.global_search and routing.get("state") == "use" and args.search_in in ("kb", "all"):
+        named = routing["candidates"][0]
+        checkout = named.get("verified_checkout")
+        if checkout and named.get("exact_project_alias"):
+            local = kb_project_view.ProjectContext(
+                args.query, repo=checkout["repo"], branch=checkout["branch"], environment=args.environment,
+                project_id="", verify=verify_once, as_of=as_of, graph=graph, allow_locator=True,
+            )
+            if local.locator and local.locator["domain"]["entity_id"] == named.get("project_id"):
+                project_context, locator = local, local.locator
+                locator["workspace_dir"] = checkout["workspace_dir"]
 
     def matches_filters(raw: dict) -> bool:
         if (allowed_kinds and raw.get("kind") not in allowed_kinds) or not kb_search._matches_tags(raw, required_tags):
@@ -2516,7 +2529,7 @@ def _brief_result(payload: dict[str, Any]) -> dict[str, Any]:
         item = {key: hit[key] for key in (
             "entry_id", "kind", "title", "summary", "repo", "branch", "freshness_state",
             "freshness_scope", "trust_tier", "applicability_state", "warning", "domain", "superseded_in_scope_by",
-            "evidence_refs", "as_of", "related_via", "decision_history", "record_rev", "locator_evidence", "source_at_commit", "target_branch",
+            "evidence_refs", "as_of", "related_via", "decision_history", "record_rev", "locator_evidence", "source_at_commit", "target_branch", "workspace_dir",
         ) if hit.get(key)}
         sources = hit.get("source_paths") or hit.get("key_files") or []
         if sources:
@@ -2568,6 +2581,8 @@ def _print_markdown(payload: dict[str, Any]) -> None:
         sys.stdout.write(f"  why: {item.get('why_matched')}\n")
         if item.get("applicability_state") == "locate_only":
             sys.stdout.write(f"  locate_only {item['domain']['entity_id']} rev={item['record_rev']}\n")
+            if item.get("workspace_dir"):
+                sys.stdout.write(f"  workspace: {item['workspace_dir']}\n")
             if item.get("source_at_commit"):
                 recorded = item["source_at_commit"]
                 sys.stdout.write(f"  recorded source: {recorded['commit']}:{recorded['path']}\n")

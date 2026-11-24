@@ -43,6 +43,26 @@ def usable_events(events: list[dict]) -> list[dict]:
     return [e for e in events if "withdraws" not in e and event_id(e) not in withdrawn]
 
 
+def exact_alias(entry: dict, query: str) -> str | None:
+    """Match a whole declared name, respecting its dated ending or withdrawal."""
+    name = query.strip(" \t\r\n。？！?!").casefold()
+    if len(name) < 4:
+        return None
+    alias = next((a for a in entry.get("aliases", []) if isinstance(a, str) and a.casefold() == name), None)
+    if not alias:
+        return None
+    events = entry.get("domain", {}).get("observations", [])
+    def same_name(e):
+        return e["field"] in {"name", "alias", "project_alias"} and e["value"].casefold() == name
+    if any(same_name(e) for e in events):
+        now = datetime.now(timezone.utc)
+        history = [(bounds(e["date"])[0], e["basis"] == "ended") for e in usable_events(events)
+                   if same_name(e) and e["state"] == "confirmed" and bounds(e["date"])[0] <= now]
+        if not history or max(history)[1]:
+            return None
+    return alias
+
+
 def observation_errors(events: object) -> list[str]:
     if not isinstance(events, list):
         return ["domain.observations must be a list"]

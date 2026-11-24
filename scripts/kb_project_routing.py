@@ -12,7 +12,7 @@ from pathlib import Path
 
 import kb_domain
 from kb_lib import _current_branch, _repo_root, expand_query
-from kb_timeline import bounds, usable_events
+from kb_timeline import bounds, exact_alias, usable_events
 
 # Titles and trigger terms supply the domain vocabulary. These are conversational
 # glue and project-reference grammar, independent of which projects are installed.
@@ -328,9 +328,19 @@ def suggest(query, graph, *, cwd, files=(), scope=None, synonyms=None, verify):
     candidates = [top] if use else [top, *(r[1] for r in credible[:2])]
     if len(candidates) == 1 and top.get("project_id"):
         owner = next(e for e in graph["entries"] if e["domain"]["entity_id"] == top["project_id"])
-        if verify(owner).get("state") != "fresh":
+        evidence_state = verify(owner).get("state")
+        if evidence_state != "fresh":
             top["needs_recheck"] = True
-            use = False
+            checkout = None
+            alias = exact_alias(owner, query)
+            if use and evidence_state == "needs_recheck" and not owner.get("_archived"):
+                checkout = _checkout_identity(owner, top, query, alias, scope or {})
+            if checkout:
+                top["verified_checkout"] = checkout
+                if alias:
+                    top["exact_project_alias"] = alias
+            else:
+                use = False
         else:
             children, explicit = _children(query, projects[top["project_id"]].children, top, verify)
             if children:
@@ -390,7 +400,38 @@ def _children(query, children, parent, verify):
     return result, explicit
 
 
+def _checkout_identity(owner, candidate, query, alias, scope):
+    """Recheck the checkout independently of mutable project documentation."""
+    workspace = Path(owner.get("workspace_dir") or "")
+    if not workspace.is_absolute() or workspace.name.casefold() != owner["repo"].casefold():
+        return None
+    workspace = workspace.resolve()
+    name = query.strip(" \t\r\n。？！?!").casefold()
+    if any(a.casefold() == name for a in owner.get("aliases", [])) and not alias:
+        return None
+    locations = [Path(p).resolve() for p in candidate["locations"].values()]
+    if not (any(p.is_relative_to(workspace) for p in locations) or alias):
+        return None
+    if _repo_root(workspace) != workspace:
+        return None
+    branch = _current_branch(workspace)
+    if not branch or branch != owner.get("branch") or (scope.get("branch") and branch != scope["branch"]):
+        return None
+    owned = any(
+        s.get("type") == "git_file" and s.get("branch") == branch and s.get("path") and s.get("source_path")
+        and not Path(s["path"]).is_absolute() and ".." not in Path(s["path"]).parts
+        and (workspace / s["path"]).resolve() == (workspace / s["source_path"]).resolve()
+        and (workspace / s["path"]).resolve().is_relative_to(workspace)
+        for s in owner.get("evidence_snapshots", [])
+    )
+    if not owned:
+        return None
+    return {"repo": owner["repo"], "branch": branch, "workspace_dir": str(workspace)}
+
+
 def search_branch(chosen, graph):
+    if chosen.get("verified_checkout"):
+        return chosen["verified_checkout"]["branch"]
     location = chosen["locations"].get("current_file") or chosen["locations"].get("cwd")
     if location:
         cwd = Path(location)

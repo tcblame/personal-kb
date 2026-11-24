@@ -187,3 +187,7 @@ On November 22 the installed version met the expected project decision on 13 of 
 ## 2026-11-24 source location and branch applicability
 
 Maintenance candidate for phase A. An exact ticket can return a source locator when the owner or its project has changed evidence. The receipt distinguishes location from adoption and carries the record revision. The branch review uses verified scoped replacements and the target branch for ordinary and dated queries. The domain CLI tests cover changed authorities, scope, closeout effects and sibling-branch history. This phase was evaluated on isolated data.
+
+## 2026-11-24 project names and outcome evidence
+
+A unique current alias can locate an owner with changed evidence. The project router can independently confirm its Git checkout and branch. Source-only cards carry the revision and keep the original verification requirements. The daily instructions bring device- or client-specific retrieval before the first dependent decision, and tie a correction to the earlier owner. Structured closeout accepts an optional outcome pointer on a declared adoption.
