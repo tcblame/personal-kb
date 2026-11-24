@@ -30,9 +30,6 @@ DEFAULT_MAX_SESSIONS = 100
 DEFAULT_MAX_TURNS = 12
 DEFAULT_MAX_TURN_CHARS = 3200
 DEFAULT_MAX_SESSION_CHARS = 18000
-UUID_RE = re.compile(
-    r"(?i)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
-)
 WINDOWS_PATH_RE = re.compile(r"^(?P<drive>[A-Za-z]):[\\/](?P<rest>.*)$")
 CONTEXT_PREFIXES = (
     "# AGENTS.md instructions",
@@ -102,13 +99,16 @@ SIGNAL_GROUPS: dict[str, tuple[str, ...]] = {
 
 def _clip(value: str, limit: int) -> str:
     text = str(value or "").strip()
-    if limit <= 0 or len(text) <= limit:
+    if limit <= 0:
+        return ""
+    if len(text) <= limit:
         return text
-    if limit < 20:
+    marker = "\n...[truncated]...\n"
+    if limit < len(marker) + 2:
         return text[:limit]
-    head = max(1, (limit - 18) // 2)
-    tail = max(1, limit - 18 - head)
-    return f"{text[:head]}\n...[truncated]...\n{text[-tail:]}"
+    available = limit - len(marker)
+    head = available // 2
+    return text[:head] + marker + text[-(available - head):]
 
 
 def _dedupe_paths(paths: Iterable[Path]) -> list[Path]:
@@ -283,8 +283,7 @@ def _guess_date(path: Path, root: Path, source: str) -> date | None:
 
 
 def _filename_id(path: Path) -> str:
-    matches = UUID_RE.findall(path.stem)
-    return matches[-1].lower() if matches else path.stem
+    return filename_session_id(path) or path.stem
 
 
 def _content_text(value: Any) -> str:
@@ -329,21 +328,49 @@ def _clean_text(value: str) -> str:
     return text.strip()
 
 
+def _clarification_parts(text: str) -> tuple[str, str] | None:
+    opening = "<send_user_message_question_reply>"
+    closing = "</send_user_message_question_reply>"
+    if not (text.startswith(opening) and text.endswith(closing)):
+        return None
+    try:
+        items = json.loads(text[len(opening):-len(closing)])
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(items, list) or not items:
+        return None
+    answers, questions = [], []
+    for index, item in enumerate(items, 1):
+        if not isinstance(item, dict):
+            return None
+        answer, question = item.get("answer"), item.get("question")
+        if not all(isinstance(value, str) and value.strip() for value in (answer, question)):
+            return None
+        answers.append(f"Answer {index}: {answer.strip()}")
+        questions.append(f"Question {index}: {question.strip()}")
+    # A long prompt can otherwise push the user's correction outside the excerpt.
+    return "\n".join(answers), "\n".join(questions)
+
+
 def _append_message(
-    messages: list[dict[str, str]],
+    messages: list[dict[str, Any]],
     *,
     role: str,
     text: str,
-    timestamp: str,
+    line: int,
     max_chars: int,
 ) -> None:
     cleaned = _clean_text(text)
     if not cleaned:
         return
-    bounded = _clip(cleaned, max(800, max_chars * 4))
-    if messages and messages[-1]["role"] == role and messages[-1]["text"] == bounded:
+    parts = _clarification_parts(cleaned) if role == "user" else None
+    limit = max(800, max_chars * 4)
+    message = {"role": role, "text": _clip(parts[0] if parts else cleaned, limit)}
+    if parts:
+        message["questions"] = _clip(parts[1], limit)
+    if messages and all(messages[-1].get(key) == message.get(key) for key in ("role", "text", "questions")):
         return
-    messages.append({"role": role, "text": bounded, "timestamp": timestamp})
+    messages.append({**message, "line": line})
 
 
 def _codex_meta(payload: dict[str, Any]) -> dict[str, Any]:
@@ -369,7 +396,7 @@ def _is_subagent(meta: dict[str, Any], path: Path) -> bool:
     )
 
 
-def _build_turns(messages: list[dict[str, str]]) -> list[dict[str, str]]:
+def _build_turns(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     raw_turns: list[dict[str, Any]] = []
     current: dict[str, Any] | None = None
     for message in messages:
@@ -378,29 +405,24 @@ def _build_turns(messages: list[dict[str, str]]) -> list[dict[str, str]]:
         if role == "user":
             if current and (current.get("user") or current.get("assistant_parts")):
                 raw_turns.append(current)
-            current = {"user": text, "assistant_parts": []}
+            current = {"user": text, "user_line": message["line"], "assistant_parts": []}
+            if "questions" in message:
+                current["questions"] = message["questions"]
         elif role == "assistant":
             if current is None:
                 current = {"user": "", "assistant_parts": []}
-            parts = current["assistant_parts"]
-            if text not in parts:
-                parts.append(text)
+            current["assistant_parts"].append(text)
+            current["assistant_last_line"] = message["line"]
     if current and (current.get("user") or current.get("assistant_parts")):
         raw_turns.append(current)
 
-    turns: list[dict[str, str]] = []
     for index, raw in enumerate(raw_turns, start=1):
-        turns.append(
-            {
-                "turn": str(index),
-                "user": str(raw.get("user") or ""),
-                "assistant": "\n\n".join(raw.get("assistant_parts") or []),
-            }
-        )
-    return turns
+        raw["turn"] = str(index)
+        raw["assistant"] = "\n\n".join(raw.pop("assistant_parts"))
+    return raw_turns
 
 
-def _limit_turns(turns: list[dict[str, str]], limit: int) -> tuple[list[dict[str, str]], int]:
+def _limit_turns(turns: list[dict[str, Any]], limit: int) -> tuple[list[dict[str, Any]], int]:
     if len(turns) <= limit:
         return turns, 0
     head_count = max(1, (limit + 1) // 2)
@@ -410,38 +432,35 @@ def _limit_turns(turns: list[dict[str, str]], limit: int) -> tuple[list[dict[str
 
 
 def _bound_turn_text(
-    turns: list[dict[str, str]],
+    turns: list[dict[str, Any]],
     *,
     max_turn_chars: int,
     max_session_chars: int,
-) -> list[dict[str, str]]:
-    bounded: list[dict[str, str]] = []
-    for turn in turns:
-        bounded.append(
-            {
-                "turn": turn["turn"],
-                "user": _clip(turn.get("user", ""), max_turn_chars),
-                "assistant": _clip(turn.get("assistant", ""), max_turn_chars),
-            }
-        )
+) -> list[dict[str, Any]]:
+    def excerpt(turn: dict, user_limit: int, assistant_limit: int) -> dict:
+        row = dict(turn)
+        questions = row.pop("questions", "")
+        user = _clip(row["user"], user_limit)
+        space = user_limit - len(user) - 1
+        if questions and space > 0:
+            user += "\n" + _clip(questions, space)
+        row.update(user=user, assistant=_clip(row["assistant"], assistant_limit))
+        return row
+
+    bounded = [excerpt(turn, max_turn_chars, max_turn_chars) for turn in turns]
     total = sum(len(row["user"]) + len(row["assistant"]) for row in bounded)
     if total <= max_session_chars or not bounded:
         return bounded
 
-    per_turn = max(240, max_session_chars // len(bounded))
-    user_limit = max(100, per_turn * 2 // 5)
-    assistant_limit = max(120, per_turn - user_limit)
-    return [
-        {
-            "turn": row["turn"],
-            "user": _clip(row["user"], user_limit),
-            "assistant": _clip(row["assistant"], assistant_limit),
-        }
-        for row in bounded
-    ]
+    per_turn, remainder = divmod(max_session_chars, len(bounded))
+    for i, row in enumerate(bounded):
+        budget = per_turn + int(i < remainder)
+        user_limit = min(len(row["user"]), max((budget * 2 + 4) // 5, budget - len(row["assistant"])))
+        bounded[i] = excerpt(turns[i], user_limit, min(max_turn_chars, budget - user_limit))
+    return bounded
 
 
-def _signals(turns: list[dict[str, str]]) -> list[str]:
+def _signals(turns: list[dict[str, Any]]) -> list[str]:
     text = "\n".join(
         f"{row.get('user', '')}\n{row.get('assistant', '')}" for row in turns
     ).lower()
@@ -463,7 +482,7 @@ def _parse_session(
 ) -> dict[str, Any]:
     meta: dict[str, Any] = {}
     metadata_rows: list[dict[str, Any]] = []
-    messages: list[dict[str, str]] = []
+    messages: list[dict[str, Any]] = []
     timestamps: list[str] = []
     invalid_rows = 0
     line_count = 0
@@ -518,7 +537,7 @@ def _parse_session(
                             messages,
                             role="user",
                             text=str(payload.get("message") or payload.get("text") or ""),
-                            timestamp=row_timestamp,
+                            line=line_count,
                             max_chars=max_turn_chars,
                         )
                     if (
@@ -530,7 +549,7 @@ def _parse_session(
                             messages,
                             role=str(payload["role"]),
                             text=_content_text(payload.get("content")),
-                            timestamp=row_timestamp,
+                            line=line_count,
                             max_chars=max_turn_chars,
                         )
                 else:
@@ -543,7 +562,7 @@ def _parse_session(
                             messages,
                             role=role,
                             text=_content_text(message.get("content", message)),
-                            timestamp=row_timestamp,
+                            line=line_count,
                             max_chars=max_turn_chars,
                         )
                     if not meta:

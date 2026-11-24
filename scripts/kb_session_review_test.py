@@ -28,6 +28,16 @@ PARENT = '22222222-2222-4222-8222-222222222222'
 
 
 class SessionReviewTests(unittest.TestCase):
+    def curate_messages(self, messages, turn_chars=200, session_chars=2000):
+        rows = [{'type': 'session_meta', 'payload': {'id': OWN}}]
+        rows.extend({'type': 'response_item', 'payload': {'type': 'message', 'role': role, 'content': text}}
+                    for role, text in messages)
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / f'rollout-{OWN}.jsonl'
+            path.write_text('\n'.join(json.dumps(row) for row in rows))
+            return curate._parse_session(path, source='codex', max_turn_chars=turn_chars,
+                                         max_turns=5, max_session_chars=session_chars)['turns']
+
     def test_own_metadata_wins_over_inherited_parent(self):
         rows = [{'type': 'session_meta', 'payload': {'id': OWN, 'thread_source': 'subagent'}},
                 {'type': 'session_meta', 'payload': {'id': PARENT, 'thread_source': 'user'}}]
@@ -48,6 +58,67 @@ class SessionReviewTests(unittest.TestCase):
             result = curate._parse_session(p, source='codex', max_turn_chars=100, max_turns=5, max_session_chars=500)
         self.assertEqual(result['session_id'], OWN)
         self.assertTrue(result['is_subagent'])
+
+    def test_clarification_keeps_the_answers_and_original_line_under_clipping(self):
+        prompt = 'Use the proposed plan? ' * 25
+        items = [{'questionItemId': 'internal', 'question': prompt, 'answer': 'Keep the originals.'},
+                 {'question': 'Enable export?', 'answer': 'Skip export.'}]
+        text = '<send_user_message_question_reply>' + json.dumps(items) + '</send_user_message_question_reply>'
+        rows = [
+            {'type': 'session_meta', 'payload': {'id': OWN}},
+            {'type': 'response_item', 'payload': {'type': 'message', 'role': 'user', 'content': text}},
+            {'type': 'event_msg', 'payload': {'type': 'user_message', 'message': text}},
+            {'type': 'response_item', 'payload': {'type': 'message', 'role': 'assistant', 'content': prompt}},
+            {'type': 'response_item', 'payload': {'type': 'message', 'role': 'assistant', 'content': 'Done.'}},
+        ]
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / f'rollout-{OWN}.jsonl'
+            path.write_text('\n'.join(json.dumps(row) for row in rows))
+            def extract(chars, total):
+                return curate._parse_session(path, source='codex', max_turn_chars=chars,
+                                             max_turns=5, max_session_chars=total)['turns']
+            full, = extract(2000, 5000)
+            compact, = extract(140, 5000)
+            session_limited, = extract(2000, 320)
+        self.assertIn('Question 2: Enable export?', full['user'])
+        for turn in (full, compact, session_limited):
+            self.assertIn('Answer 1: Keep the originals.', turn['user'])
+            self.assertIn('Answer 2: Skip export.', turn['user'])
+            self.assertEqual((turn['user_line'], turn['assistant_last_line']), (2, 5))
+            self.assertNotIn('questionItemId', turn['user'])
+        self.assertLessEqual(len(compact['user']), 140)
+
+    def test_clarification_only_formats_complete_user_replies(self):
+        opening = '<send_user_message_question_reply>'
+        closing = '</send_user_message_question_reply>'
+        wrapped = opening + '[{"question":"Ship?","answer":"Wait."}]' + closing
+        samples = [('assistant', wrapped), ('user', 'Example: ' + wrapped),
+                   ('user', opening + 'invalid JSON' + closing),
+                   ('user', opening + '[{"question":"Ship?"}]' + closing)]
+        for role, text in samples:
+            with self.subTest(role=role, text=text):
+                turn, = self.curate_messages([(role, text)])
+                self.assertEqual(turn[role], text)
+
+    def test_assistant_returning_to_an_earlier_decision_keeps_its_order(self):
+        turn, = self.curate_messages([('user', 'Release?'), ('assistant', 'Wait.'),
+                                      ('assistant', 'Go ahead.'), ('assistant', 'Wait.')])
+        self.assertEqual(turn['assistant'].splitlines()[-1], 'Wait.')
+        self.assertEqual(turn['assistant_last_line'], 5)
+
+    def test_answer_has_priority_and_small_session_limits_are_honored(self):
+        answer = 'Keep the signed originals in both archives until release.'
+        messages = []
+        for question in ('Approve? ' * 30, 'Publish? ' * 30):
+            body = json.dumps([{'answer': answer, 'question': question}])
+            text = '<send_user_message_question_reply>' + body + '</send_user_message_question_reply>'
+            messages.append(('user', text))
+        for budget in (1, 80, 180):
+            rows = self.curate_messages(messages, turn_chars=90, session_chars=budget)
+            self.assertLessEqual(sum(len(r['user']) + len(r['assistant']) for r in rows), budget)
+            self.assertEqual([r['user_line'] for r in rows], [2, 3])
+            if budget == 180:
+                self.assertTrue(all(answer in r['user'] for r in rows))
 
     def test_cursor_child_mirror_not_counted_as_main(self):
         with tempfile.TemporaryDirectory() as folder:

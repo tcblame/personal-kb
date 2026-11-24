@@ -12,6 +12,7 @@ from pathlib import Path
 
 import kb_domain
 from kb_lib import _current_branch, _repo_root, expand_query
+from kb_session_identity import UUID_PATTERN
 from kb_timeline import bounds, exact_alias, usable_events
 
 # Titles and trigger terms supply the domain vocabulary. These are conversational
@@ -200,7 +201,10 @@ def _features(project, terms, overview=None):
     return hits
 
 
-CHAT_MARKDOWN = re.compile(r"\[([^\]\n]+)\]\(codex://(?:threads?|chats?)/[0-9a-f-]{36}(?:\?[^)\s]*)?\)", re.I)
+_CHAT_SCHEME = r"codex://(?:threads?|chats?)/"
+_CHAT_ID = rf"({UUID_PATTERN})(?![a-f0-9-])(?:[?#][a-z0-9%._~:/?@!$&'*+,;=#-]*)?"
+CHAT_LINK = re.compile(rf"(?:{_CHAT_SCHEME}|\bcodex\s+resume\s+){_CHAT_ID}", re.I)
+CHAT_MARKDOWN = re.compile(rf"\[([^\]\n]+)\]\({_CHAT_SCHEME}{_CHAT_ID}\)", re.I)
 
 
 def chat_titles(query):

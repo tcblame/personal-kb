@@ -37,6 +37,15 @@ durable KB. Review one candidate at a time against current evidence and write
 only under the applicable destination's authorization. Skip raw transcript
 imports, guesses, duplicates, and temporary state.
 
+In a structured clarification, read the numbered answer with its corresponding
+question. The excerpt reserves space for the user's words first. Use the
+session path and the one-based `user_line` or `assistant_last_line` to check
+the source. The latter points to the last retained assistant message in that
+turn. A confirmed request, a verified implementation and a dated measurement
+can each support a different conclusion. Put the reusable answer and its
+conditions near the start of the owner's summary. Keep a snapshot value with
+its dated source.
+
 ## Maintaining the Skill repository
 
 Commit verified changes to the Skill repository promptly on the active maintenance branch. When a push is requested, push that branch and verify the remote commit ID.

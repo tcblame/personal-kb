@@ -82,6 +82,86 @@ class DomainTests(unittest.TestCase):
         self.assertEqual(code, 0, err or out)
         return json.loads(out)
 
+    def test_thread_lookup_accepts_native_ids_and_preserves_legacy_scope_and_freshness(self):
+        thread = "abcd1234-1111-4222-8333-0123456789ab"
+        owner = self.row("shipping", "component", "map")
+        owner.pop("domain")
+        owner["evidence_refs"] = [{"type": "conversation", "value": thread.upper(), "label": "user line 9"}]
+        self.save(owner)
+        foreign = self.row("elsewhere", "component", "map", repo="elsewhere")
+        foreign.pop("domain")
+        foreign["evidence_refs"] = owner["evidence_refs"]
+        self.save(foreign)
+        unrelated = self.row("unrelated", "component", "map")
+        unrelated["evidence_refs"] = [{"type": "conversation", "value": "ticket log " + thread}]
+        self.save(unrelated)
+        uri = "codex://threads/" + thread
+        for query in (uri, "codex resume " + thread, "[shipping](" + uri + ")",
+                      uri + "?hostId=shipping", "[shipping](" + uri + "?hostId=remote-wsl%3AUbuntu-24.04)"):
+            hit, = self.query(query)["items"]
+            self.assertEqual(hit["entry_id"], owner["id"])
+            self.assertEqual((hit["applicability_state"], hit["summary"]), ("locate_only", ""))
+            self.assertTrue(hit["record_rev"])
+            self.assertEqual(hit["related_via"]["threads"], [thread])
+            self.assertEqual(hit["related_via"]["source_labels"][0]["label"], "user line 9")
+        task = "Use the earlier discussion " + uri
+        focused = self.query(task, "--focus", "Which copy?", "--scope-anchor", uri)
+        self.assertIn(uri, focused["query"])
+        self.assertEqual([item["entry_id"] for item in focused["items"]], [owner["id"]])
+        unrelated_topic, = self.query("Codex billing invoice " + uri)["items"]
+        self.assertEqual((unrelated_topic["applicability_state"], unrelated_topic["summary"]), ("locate_only", ""))
+        code, _, _ = self.call("retrieve", task.replace("codex://", "https://"),
+                               "--focus", "Which copy?", "--scope-anchor", uri, "--brief")
+        self.assertEqual(code, 2)
+        other_branch, = self.query(uri, "--branch", "review")["items"]
+        self.assertEqual((other_branch["applicability_state"], other_branch["target_branch"]), ("locate_only", "review"))
+        topic_hit, = self.query("shipping")["items"]
+        combined, = self.query("shipping " + uri)["items"]
+        self.assertEqual(topic_hit["entry_id"], owner["id"])
+        self.assertEqual(combined["summary"], topic_hit["summary"])
+        self.assertEqual(combined["applicability_state"], "current")
+        for query, flags in [(uri + "0", []), ("job " + thread, []), (uri, ["--as-of", "2020-01-01"])]:
+            self.assertEqual(self.query(query, *flags)["items"], [])
+        Path(owner["source_paths"][0]).write_text("Updated authority")
+        self.assertEqual(self.query(uri)["items"], [])
+
+    def test_conversation_source_uses_confirmed_observations_and_scoped_edges(self):
+        from kb_timeline import event_id
+        thread = "abcd1234-1111-4222-8333-0123456789ab"
+        uri = "codex://threads/" + thread
+        ref = {"type": "conversation", "value": "codex resume " + thread}
+        obs = {"date": "2024-06-01", "field": "requirement", "value": "Maintain both copies",
+               "basis": "observed", "state": "confirmed", "evidence_refs": [ref]}
+        for entity, events in [
+            ("observed", [obs]), ("proposed", [{**obs, "state": "candidate"}]),
+            ("future", [{**obs, "date": "2999-01-01"}]),
+            ("withdrawn", [obs, {**obs, "date": "2024-07-01", "withdraws": event_id(obs)}]),
+        ]:
+            entry = self.row(entity, "requirement", "requirement")
+            entry["domain"]["observations"] = events
+            if entity == "observed":
+                latest = self.base / "later-release-note.md"
+                latest.write_text("Published after the observation")
+                entry.update(title="Already published", source_paths=[str(latest)], key_files=[str(latest)])
+                entry["evidence_snapshots"] = kb_evidence.capture_evidence_snapshots(entry, self.base)
+            self.save(entry)
+        edge = {**self.edge("applies_to", "p", scope={"branch": "main"}), "evidence_refs": [ref]}
+        self.save(self.row("neighbor", "requirement", "requirement", relations=[edge]))
+        for flags, expected in [
+            ([], {"entry-observed", "entry-neighbor"}),
+            (["--branch", "review"], {"entry-observed"}),
+            (["--as-of", "2024-05-31"], set()),
+            (["--as-of", "2024-06-02"], {"entry-observed"}),
+        ]:
+            with self.subTest(flags=flags):
+                ids = {hit["entry_id"] for hit in self.query(uri, *flags)["items"]}
+                self.assertEqual(ids, expected)
+        for output in ([], ["--brief"]):
+            dated, = self.query(uri, "--as-of", "2024-06-02", *output)["items"]
+            self.assertEqual(dated["title"], "observed")
+            self.assertNotIn("later-release-note.md", json.dumps(dated))
+            self.assertNotIn("Already published", json.dumps(dated))
+
     def remember(self, entry):
         data = {key: value for key, value in entry.items()
                 if key not in {"id", "repo", "branch", "workspace_dir", "schema_version",

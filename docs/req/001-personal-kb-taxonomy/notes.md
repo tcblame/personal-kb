@@ -191,3 +191,7 @@ Maintenance candidate for phase A. An exact ticket can return a source locator w
 ## 2026-11-24 project names and outcome evidence
 
 A unique current alias can locate an owner with changed evidence. The project router can independently confirm its Git checkout and branch. Source-only cards carry the revision and keep the original verification requirements. The daily instructions bring device- or client-specific retrieval before the first dependent decision, and tie a correction to the earlier owner. Structured closeout accepts an optional outcome pointer on a declared adoption.
+
+## 2026-11-24 session curation and conversation references
+
+An isolated replay exposed a user correction lost in a short excerpt and a conversation reference stored as a native session ID that a chat link could not resolve. Curation now gives answers first claim on the text budget and returns original line numbers. Retrieval preserves the chat URI through focused lookup and handles the session ID directly on the owning record. A link alone can locate the source. A substantive answer needs a separate topic match and current evidence. Session review and domain CLI regressions cover these paths, ambiguous wording, scope and historical cutoffs.

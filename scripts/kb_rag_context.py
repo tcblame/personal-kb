@@ -24,12 +24,14 @@ configure_utf8_streams()
 import kb_git_reads
 import kb_search
 import kb_session_brief
+from kb_session_identity import UUID_RE
 from kb_runtime import runtime_scope, runtime_session_id
 from kb_timing import count, span, timed
 import kb_evidence
 import kb_domain
 import kb_project_view
 import kb_project_routing
+from kb_project_routing import CHAT_LINK
 from kb_kinds import VALID_KINDS, parse_kind_filter, parse_legacy_type_filter
 from kb_lib import (
     JsonlSafetyError,
@@ -100,6 +102,8 @@ def _retrieval_id(value: str) -> str:
 def _scope_anchor_value(anchor: str) -> str:
     """Return the human-readable part of an optional ``kind:value`` anchor."""
     text = str(anchor or "").strip()
+    if re.match(r"^[a-z][a-z0-9+.-]*://", text, re.I):
+        return text
     if ":" in text:
         _prefix, value = text.split(":", 1)
         return value.strip() or text
@@ -627,26 +631,68 @@ def _literal_cjk_anchors(query: str) -> list[str]:
     return sorted(matches, key=lambda value: (-len(value), value))[:6]
 
 
-CHAT_LINK = re.compile(r"(?:codex://(?:threads?|chats?)/|\bcodex\s+resume\s+)"
-                       r"([a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})(?![a-f0-9-])", re.I)
+def _conversation_ids(ref: dict) -> set[str]:
+    if not isinstance(ref, dict) or ref.get("type") != "conversation":
+        return set()
+    value = str(ref.get("value", "")).strip()
+    if UUID_RE.fullmatch(value):
+        return {value.lower()}
+    return {match.lower() for match in CHAT_LINK.findall(value)}
 
 
-def _linked_records(query, project, include_noncurrent):
+def _linked_records(query, project, include_noncurrent, explicit_repo):
     ids = {value.lower() for value in CHAT_LINK.findall(query)}
     if not ids:
         return []
+    from kb_timeline import bounds, usable_events, view
+    from zoneinfo import ZoneInfo
+
+    zone = ZoneInfo("Asia/Shanghai")
+    now = datetime.now(zone)
     found = []
     for path in sorted(storage_layout().records.rglob("kb.jsonl")):
         for entry in read_jsonl(path):
             if entry.get("_deleted") or entry.get("_archived") or (_is_noncurrent(entry) and not include_noncurrent):
                 continue
             domain = entry.get("domain") or {}
-            refs = [ref for obj in [entry, *domain.get("observations", []), *domain.get("relations", [])]
-                    for ref in obj.get("evidence_refs", []) if ref.get("type") == "conversation"]
-            linked = {value.lower() for ref in refs for value in CHAT_LINK.findall(str(ref.get("value", "")))}
-            overlap = sorted(ids & linked)
-            if overlap and project.eligible(entry, include_noncurrent=include_noncurrent):
-                found.append((entry, {"type": "conversation", "threads": overlap}))
+            if not isinstance(domain, dict):
+                continue
+            observations = domain.get("observations") or []
+            relations = domain.get("relations") or []
+            # Resolve authority and historical scope only for records citing this thread.
+            if not any(ids & _conversation_ids(ref)
+                       for source in (entry, *observations, *relations) if isinstance(source, dict)
+                       for ref in source.get("evidence_refs") or []):
+                continue
+            if explicit_repo and entry.get("repo") != explicit_repo and not project.same_project(entry):
+                continue
+            if not project.eligible(entry, include_noncurrent=include_noncurrent):
+                continue
+            if project.as_of:
+                # An undated reference cannot establish what was known at a historical cutoff.
+                sources = [event for field in view(observations, project.as_of, zone)
+                           if field["status"] != "uncertain" for event in field["observations"]]
+            else:
+                sources = [entry]
+                sources.extend(event for event in usable_events(observations)
+                               if event["state"] == "confirmed" and bounds(event["date"], zone)[0] <= now)
+                sources.extend(edge for edge in relations
+                               if kb_domain.declaration_active(edge, project.scope, now=now))
+            threads = set()
+            labels = []
+            for source in sources:
+                for ref in source.get("evidence_refs") or []:
+                    overlap = ids & _conversation_ids(ref)
+                    threads.update(overlap)
+                    if overlap and ref.get("label") and len(labels) < 3:
+                        pointer = {"threads": sorted(overlap), "label": _clip(str(ref["label"]), 160)}
+                        if pointer not in labels:
+                            labels.append(pointer)
+            if threads:
+                via = {"type": "conversation", "threads": sorted(threads)}
+                if labels:
+                    via["source_labels"] = labels
+                found.append((entry, via))
     return found
 
 
@@ -1803,10 +1849,15 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
     _validate_scope_anchors(args.query, scope_anchors)
 
     original_query = args.query
-    clean_query, link_titles = kb_project_routing.chat_titles(original_query)
-    if link_titles and not getattr(args, "no_domain", False):
+    link_only = False
+    chat = CHAT_LINK.search(original_query)
+    if chat and not getattr(args, "no_domain", False):
+        # A link title helps project routing, but is not independent topic evidence.
+        outside_links = kb_project_routing.CHAT_MARKDOWN.sub(" ", original_query)
+        topic = CHAT_LINK.sub(" ", outside_links).strip()
+        link_only = not re.search(r"\w", topic)
         args = argparse.Namespace(**vars(args))
-        args.query = clean_query
+        args.query = chat[1] if link_only else topic
     as_of = None
     period = getattr(args, "as_of", "")
     if not period and not getattr(args, "no_domain", False) and any(
@@ -1857,7 +1908,7 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
 
     allowed_kinds = _parse_allowed_kinds(args.kind_filter, args.legacy_type_filter)
     config = load_config()
-    expand_requested = bool(args.expand or config.get("search", {}).get("expand_queries", False))
+    expand_requested = not link_only and bool(args.expand or config.get("search", {}).get("expand_queries", False))
     precision_config = config.get("search", {}).get("precision", {})
     max_query_variants = _bounded_int(
         precision_config.get("max_query_variants"),
@@ -1934,7 +1985,7 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
     rejected_nonactionable_count = 0
     query_group_payload: list[dict[str, str]] = []
 
-    if not args.no_session_briefs:
+    if not args.no_session_briefs and not link_only:
         query_group_payload.append({"name": "recent-session", "query": args.query})
         with span("retrieve.session_briefs"):
             recent_briefs = kb_session_brief.search_recent_briefs(
@@ -2022,7 +2073,7 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
                 "query": plan.query,
                 "expanded": False,
                 "variant_index": 0,
-                "raw_results": raw_results,
+                "raw_results": [] if link_only else raw_results,
             }
         )
 
@@ -2037,13 +2088,13 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
                 environment=getattr(args, "environment", ""),
                 project_id=getattr(args, "project_id", ""), verify=verify_once, as_of=as_of,
                 graph=graph, clarify=not explicit_repo and routing.get("state") == "clarify",
-                allow_locator=not args.global_search and args.search_in in ("kb", "all")
+                allow_locator=not link_only and not args.global_search and args.search_in in ("kb", "all")
                 and bool((explicit_repo and args.branch) or local_scope),
             )
     locator = project_context.locator if project_context else None
     # A global lookup can name one specific project folder. The checkout proves
     # its location only. Keep global ranking and authority if no safe locator exists.
-    if project_context and args.global_search and routing.get("state") == "use" and args.search_in in ("kb", "all"):
+    if project_context and not link_only and args.global_search and routing.get("state") == "use" and args.search_in in ("kb", "all"):
         named = routing["candidates"][0]
         checkout = named.get("verified_checkout")
         if checkout and named.get("exact_project_alias"):
@@ -2387,11 +2438,11 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
 
     if project_context and not locator:
         with span("retrieve.domain_related"):
-            related = project_context.related(set(candidates), limit=min(32, max(0, search_limit)),
-                                              include_noncurrent=args.include_noncurrent)
+            related = [] if link_only else project_context.related(
+                set(candidates), limit=min(32, max(0, search_limit)), include_noncurrent=args.include_noncurrent)
             if args.search_in in ("kb", "all"):
-                related.extend(_linked_records(original_query, project_context, args.include_noncurrent))
-                if routing.get("state") == "use":
+                related.extend(_linked_records(original_query, project_context, args.include_noncurrent, explicit_repo))
+                if not link_only and routing.get("state") == "use":
                     chosen = routing["candidates"][0]
                     owner = project_context.entities.get(chosen.get("entity_id") or chosen.get("project_id"))
                     name = chosen.get("matched_name", "")
@@ -2399,17 +2450,19 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
                             and project_context.eligible(owner) and project_context.current(owner)):
                         related.append((owner, {"type": "project_name", "name": name}))
         for raw, path in related:
-            if not args.include_weak and not _subject_compatible(raw, args.query, subjects, subject_topics):
-                count("retrieve.rejected_subject")
-                continue
             if not matches_filters(raw):
                 continue
-            if prior_decision_query and not _is_decision_candidate(raw):
-                continue
-            if non_kb_maintenance_query and _is_personal_kb_runtime_entry(raw):
-                continue
-            if path["type"] == "conversation" and verify_once(raw)["state"] != "fresh":
-                continue
+            if path["type"] == "conversation":
+                if verify_once(raw)["state"] != "fresh":
+                    continue
+            else:
+                if not args.include_weak and not _subject_compatible(raw, args.query, subjects, subject_topics):
+                    count("retrieve.rejected_subject")
+                    continue
+                if prior_decision_query and not _is_decision_candidate(raw):
+                    continue
+                if non_kb_maintenance_query and _is_personal_kb_runtime_entry(raw):
+                    continue
             entry_id = raw.get("id")
             if entry_id in candidates:
                 candidates[entry_id]["related_via"] = path
@@ -2420,7 +2473,24 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
                 evidence=verify_once(raw),
             )
             item["related_via"] = path
-            annotate_domain(item, raw)
+            if path["type"] == "conversation":
+                # The thread identifies a source. Only an independently matched topic
+                # can support a substantive card (handled above in candidates).
+                _check_branch_applicability(item, reference_repo or explicit_repo, reference_branch, [])
+                item["applicability_state"] = "locate_only"
+                item["summary"] = ""
+                item.pop("evidence_refs", None)
+                item["record_rev"] = raw.get("record_rev") or kb_evidence.canonical_entry_revision(raw)
+                if as_of:
+                    # Titles and file lists describe the current revision. Only the
+                    # matched dated citation identifies a source at this cutoff.
+                    domain = raw["domain"]
+                    item.update(as_of=as_of.isoformat(), title=domain["entity_id"], source_paths=[],
+                                key_files=[], matched_fields=[], matched_anchors=[],
+                                domain={k: domain[k] for k in ("entity_id", "entity_type", "project_id")})
+                _append_warning(item, "请打开所引会话，核对原话和当前问题的适用范围。")
+            else:
+                annotate_domain(item, raw)
             item["query_groups"] = ["linked-chat" if path["type"] == "conversation" else "project-graph"]
             item["why_matched"] = "verified evidence link: " + path["type"]
             item["_score"] = 2.5 + _freshness_rank(item["freshness_state"])
