@@ -149,6 +149,7 @@ def _compact_retrieval_items(value: Any) -> list[dict[str, Any]]:
                 "kind": str(item.get("kind") or ""),
                 "freshness_state": str(item.get("freshness_state") or "legacy_unverified"),
                 "trust_tier": str(item.get("trust_tier") or ""),
+                **({"applicability_state": "locate_only"} if item.get("applicability_state") == "locate_only" else {}),
             }
         )
     return compact
@@ -431,6 +432,7 @@ def build_closeout(args: argparse.Namespace) -> dict[str, Any]:
     snapshot_queries: list[str] = []
     snapshot_sessions: list[str] = []
     snapshot_topics: list[str] = []
+    locate_only_ids = {i["entry_id"] for i in retrieval_items if i.get("applicability_state") == "locate_only"}
     if snapshot_authoritative:
         retrieval_ids: list[str] = []
         all_items: list[dict[str, Any]] = []
@@ -461,6 +463,9 @@ def build_closeout(args: argparse.Namespace) -> dict[str, Any]:
             snapshot_topics.extend(_list_from_payload(result.get("topic_id")))
         snapshot_hit_count = len(all_items)
         snapshot_ids = _dedupe(snapshot_ids)
+        # A fresh child can still be location-only because its project evidence
+        # changed. Checking just the child again during adoption misses that.
+        locate_only_ids = {i["entry_id"] for i in all_items if i.get("applicability_state") == "locate_only"}
         if linked_retrieval_ids and linked_retrieval_ids != retrieval_ids:
             raise ValueError("retrieval_snapshot conflicts with linked retrieval ids")
         linked_retrieval_ids = retrieval_ids
@@ -504,6 +509,8 @@ def build_closeout(args: argparse.Namespace) -> dict[str, Any]:
         for entry_id in _dedupe([*legacy_used, *adoption_effects["decide"], *adoption_effects["fix"], *adoption_effects["write"]])
         if entry_id not in brief_ids
     ]
+    if locate_only_ids.intersection(heat_entry_ids):
+        raise ValueError("a locate_only receipt supports only the locate effect; verify and retrieve again for decision adoption")
     written = _dedupe([*_list_from_payload(payload.get("written_entry_ids")), *args.written])
     updated = _dedupe([*_list_from_payload(payload.get("updated_entry_ids")), *args.updated])
     hit_entry_ids = _dedupe(

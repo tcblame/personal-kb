@@ -617,12 +617,14 @@ def _verify_retained_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     return {"state": "fresh", "reason": "retained evidence matches the current manifest"}
 
 
+# A changed file can be opened for rechecking only if the other authorities
+# can also be verified. A missing authority must survive aggregation.
 _STATE_PRIORITY = {
     "fresh": 0,
     "legacy_unverified": 1,
     "not_snapshotted": 2,
-    "unresolvable": 3,
-    "needs_recheck": 4,
+    "needs_recheck": 3,
+    "unresolvable": 4,
     "diverged": 5,
     "dirty_worktree": 6,
     "conflicted": 7,

@@ -50,6 +50,12 @@ Never treat a hit as current truth. Verify it against current files, logs, tests
 
 ## Precision and ranking
 
+A complete ticket code can locate one domain owner in an established repository and branch. Codes may appear inside a question. The owner and project must share the requested bucket, have active declarations for the requested scope and date, and have either fresh evidence or evidence that needs rechecking. If either needs rechecking, `retrieve` returns one `locate_only` result with the code, entity and project IDs, record revision, source pointers and the two evidence states in `locator_evidence`. Its retrieval score measures the exact identity match. The caller opens the source to establish the answer. An as-of locator carries the cutoff. Its contents supply no dated observations. Competing owners, scoped replacements and unresolved sources prevent this fallback. Normal kind, tag, recency and output limits still apply.
+
+For a Git file, `source_at_commit` identifies the recorded commit and path. That revision also locates the original bytes if the current branch has since renamed or removed the file.
+
+The record's `branch` identifies its source. When that branch differs from the target, a confirmed declaration or applicable scoped replacement can establish coverage. Otherwise the result carries the `target_branch` and a review warning. A replacement limited to another branch also requires review in the source branch. A fresh file can support a historical result. The cutoff still controls which observations and references appear.
+
 With `--focus` or `--action`, a repeatable `--scope-anchor` can carry the
 specific device, character, or ticket named in the original task into the
 selected question. Use it when the shorter question omits that object. Other

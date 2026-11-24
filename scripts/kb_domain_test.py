@@ -189,6 +189,126 @@ class DomainTests(unittest.TestCase):
         history = self.query("灯塔系统 old", "--branch", "experiment", "--include-noncurrent")
         self.assertIn("old", self.ids(history))
 
+    def test_changed_project_evidence_can_locate_only_the_exact_ticket(self):
+        ticket = self.row("ticket", "requirement", "requirement", aliases=["T022"], title="T022 old answer",
+                          relations=[self.edge("supported_by", "neighbour")])
+        self.save(ticket)
+        self.save(self.row("neighbour", "evidence", "implementation"))
+        Path(self.project["source_paths"][0]).write_text("new project evidence")
+        for query, flags in [("T022", []), ("请查t022的依据", ["--brief"]),
+                             ("T022", ["--project-id", "p", "--project-view"]),
+                             ("请查T022", ["--as-of", "2026-11-19"])]:
+            with self.subTest(query=query, flags=flags):
+                result = self.query(query, *flags)
+                self.assertEqual([i["entry_id"] for i in result["items"]], [ticket["id"]])
+                item = result["items"][0]
+                self.assertEqual(item["title"], "T022")
+                self.assertEqual(item["applicability_state"], "locate_only")
+                self.assertEqual(item["locator_evidence"], {"owner": "fresh", "project": "needs_recheck"})
+                self.assertEqual(item["record_rev"], ticket["record_rev"])
+                self.assertEqual(item["source_paths"][0], self.project["source_paths"][0])
+                self.assertFalse(item.get("summary") or item.get("evidence_refs") or item.get("decision_history"))
+                if "--as-of" in flags:
+                    self.assertTrue(item["as_of"].startswith("2026-11-19"))
+                if "--project-view" in flags:
+                    self.assertEqual(result["project_view"]["needs_review_ids"], [ticket["id"]])
+        for query in ("T0220", "AT022", "T022-A", "T022.1", "T022 与 T021"):
+            with self.subTest(query=query):
+                self.assertEqual(self.query(query)["items"], [])
+        for flags in [("--repo", "wrong"), ("--branch", "other"), ("--global",),
+                      ("--kind", "issue"), ("--tags", "missing"), ("--in", "summary")]:
+            with self.subTest(flags=flags):
+                self.assertFalse(any(i.get("applicability_state") == "locate_only"
+                                     for i in self.query("T022", *flags)["items"]))
+
+    def test_ticket_locator_requires_a_unique_active_owner_and_resolvable_sources(self):
+        ticket = self.row("ticket", "requirement", "requirement", aliases=["T022"])
+        ticket["domain"]["scope"] = {"environment": "lab"}
+        ticket["domain"]["valid_from"] = "2026-09-01"
+        self.save(ticket)
+        Path(self.project["source_paths"][0]).write_text("project changed")
+        self.assertEqual(self.query("T022")["items"], [])
+        self.assertEqual(self.query("T022", "--environment", "lab", "--as-of", "2026-08-01")["items"], [])
+        def lookup():
+            return self.query("T022", "--environment", "lab")["items"]
+        self.assertEqual(lookup()[0]["applicability_state"], "locate_only")
+        authority = Path(ticket["source_paths"][0])
+        authority.unlink()
+        self.assertEqual(lookup(), [])
+        authority.write_text("changed ticket evidence")
+        self.save(self.row("another", "requirement", "requirement", aliases=["T022"]))
+        self.assertEqual(lookup(), [])
+
+    def test_ticket_locator_respects_fresh_and_uncertain_replacements(self):
+        self.save(self.row("ticket", "requirement", "requirement", aliases=["T022"]))
+        successor = self.row("next", "requirement", "requirement",
+                             relations=[self.edge("supersedes", "ticket", scope={"branch": "main"})])
+        self.save(successor)
+        Path(self.project["source_paths"][0]).write_text("changed")
+        self.assertEqual(self.query("T022")["items"], [])
+        Path(successor["source_paths"][0]).write_text("change still under review")
+        self.assertEqual(self.query("T022")["items"], [])
+
+    def test_changed_file_does_not_mask_an_unresolvable_ticket_source(self):
+        ticket = self.row("ticket", "requirement", "requirement", aliases=["T022"], title="T022")
+        second = self.base / "second.md"
+        second.write_text("initial authority")
+        ticket["source_paths"].append(str(second))
+        ticket["evidence_snapshots"] = kb_evidence.capture_evidence_snapshots(ticket, self.base)
+        self.save(ticket)
+        Path(ticket["source_paths"][0]).write_text("changed")
+        second.unlink()
+        self.assertEqual(kb_evidence.verify_entry_evidence(ticket)["state"], "unresolvable")
+        self.assertEqual(self.query("T022")["items"], [])
+
+    def test_locate_only_receipt_cannot_heat_a_fresh_child(self):
+        ticket = self.row("ticket", "requirement", "requirement", aliases=["T022"])
+        self.save(ticket)
+        Path(self.project["source_paths"][0]).write_text("project changed")
+        receipt = self.query("T022", "--brief")
+        self.assertEqual(receipt["items"][0]["applicability_state"], "locate_only")
+        data = self.base / "closeout.json"
+        for effect in ("decide", "fix", "write", "legacy", "locate"):
+            args = {"used_entry_ids": [ticket["id"]]} if effect == "legacy" else {"adoption_effects": {effect: [ticket["id"]]}}
+            data.write_text(json.dumps({"retrieval_snapshot": receipt, **args}))
+            code, out, err = self.call("closeout", "--json-file", str(data), "--repo", "backend", "--branch", "main")
+            if effect == "locate":
+                self.assertEqual(code, 0, err or out)
+            else:
+                self.assertNotEqual(code, 0)
+                self.assertIn("locate_only", err or out)
+        rows = kb_lib.read_jsonl(self.root / "runtime" / "closeout.jsonl")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["adoption_effects"]["locate"], [ticket["id"]])
+        self.assertEqual(rows[0]["heated_entry_ids"], [])
+
+    def test_branch_scope_of_replacement_is_visible_in_daily_views(self):
+        old = self.row("previous", "requirement", "requirement")
+        new = self.row("revision", "requirement", "requirement",
+                       relations=[self.edge("supersedes", "previous", scope={"repo_id": "backend", "branch": "feature"})])
+        self.save(old)
+        self.save(new)
+        def by_id(result):
+            return {i["entry_id"]: i for i in result["items"]}
+        main = by_id(self.query("灯塔系统"))
+        self.assertEqual(main[old["id"]]["applicability_state"], "current")
+        self.assertEqual(main[new["id"]]["applicability_state"], "historical_or_out_of_scope")
+        feature = by_id(self.query("灯塔系统", "--branch", "feature"))
+        self.assertNotIn(old["id"], feature)
+        self.assertEqual(feature[new["id"]]["applicability_state"], "current")
+        for extra in [[], ["--brief"], ["--as-of", "2026-11-19"]]:
+            result = self.query("灯塔系统", "--branch", "unknown", "--project-view", *extra)
+            items = by_id(result)
+            self.assertIn(new["id"], result["project_view"]["needs_review_ids"])
+            for entry in (old, new):
+                item = items[entry["id"]]
+                self.assertEqual(item["applicability_state"], "historical_or_out_of_scope")
+                self.assertEqual(item["branch"], "main")
+                self.assertEqual(item["target_branch"], "unknown")
+                self.assertEqual(item["freshness_state"], "fresh")
+                self.assertIn("unknown", item["warning"])
+            self.assertFalse(items[new["id"]]["decision_history"][0]["applies_here"])
+
     def test_candidate_and_conflicted_edges_never_replace(self):
         self.save(self.row("old", "requirement", "requirement"))
         for state in ("candidate", "conflicted"):

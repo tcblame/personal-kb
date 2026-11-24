@@ -4,9 +4,17 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from itertools import islice
+from pathlib import Path
 from typing import Any, Callable
 
 import kb_domain
+import kb_evidence
+
+
+# Chinese prose can touch a ticket number. ASCII suffixes and dotted
+# identifiers still belong to the token (T0220, T022-A and T022.1).
+_TICKET = re.compile(r"(?<![a-z0-9_-])(?<![a-z0-9]\.)([a-z]+-?[0-9]+)(?![a-z0-9_-]|\.[a-z0-9])",
+                     re.ASCII | re.IGNORECASE)
 
 
 def mentions(query: str, value: str) -> bool:
@@ -21,7 +29,7 @@ def mentions(query: str, value: str) -> bool:
 class ProjectContext:
     def __init__(self, query: str, *, repo: str, branch: str, environment: str,
                  project_id: str, verify: Callable[[dict], dict], as_of: datetime | None = None,
-                 graph: dict | None = None, clarify: bool = False):
+                 graph: dict | None = None, clarify: bool = False, allow_locator: bool = False):
         if graph is None:
             graph = kb_domain.load_graph()
         self.graph = graph
@@ -40,8 +48,6 @@ class ProjectContext:
         self.project_id = ""
         self.matches: list[str] = []
         if project_id:
-            if not self._current_project(project_id):
-                raise ValueError("--project-id must name a current, evidenced project entity")
             self.matches = [project_id]
         else:
             self.matches = sorted(key for key, e in self.projects.items()
@@ -81,6 +87,70 @@ class ProjectContext:
                         self._edges.setdefault(endpoint, []).append((e, edge, applies))
                     if applies:
                         self._scoped_edges.append((edge["target"], e))
+
+        self.locator = self._exact_source_locator() if allow_locator else None
+        if project_id and not self.project_id and not self.locator:
+            raise ValueError("--project-id must name a current, evidenced project entity")
+
+    def _exact_source_locator(self) -> dict | None:
+        codes = {code.casefold() for code in _TICKET.findall(self.query)}
+        repo, branch = self.scope["repo_id"], self.scope["branch"]
+        if len(codes) != 1 or not repo or not branch or self.state == "ambiguous":
+            return None
+        code = codes.pop()
+        owners = []
+        for entry in self.graph["entries"]:
+            if entry.get("repo") != repo or entry.get("branch") != branch:
+                continue
+            names = [entry["domain"]["entity_id"], *entry.get("aliases", [])]
+            name = next((name for name in names if str(name).casefold() == code), None)
+            if name:
+                owners.append((entry, name))
+        if len(owners) != 1:
+            return None
+        owner, name = owners[0]
+        d = owner["domain"]
+        project = self.projects.get(d["project_id"])
+        if (owner.get("_archived") or d["entity_id"] not in self.entities or not kb_domain.active(owner, self.scope, now=self.as_of)
+                or not project or project.get("repo") != repo or project.get("branch") != branch
+                or project.get("_archived") or (self.matches and d["project_id"] not in self.matches)):
+            return None
+        owner_check, project_check = self.verify(owner), self.verify(project)
+        states = {"owner": owner_check["state"], "project": project_check["state"]}
+        if "needs_recheck" not in states.values() or set(states.values()) - {"fresh", "needs_recheck"}:
+            return None
+        self.check_history(d["entity_id"])
+        if d["entity_id"] in self.replaced or d["entity_id"] in self.uncertain_replacements:
+            return None
+        # Conversation refs, titles and observations can contain the old answer.
+        # Only expose inspected file pointers here, including a changed parent.
+        files = []
+        for row, check in ((owner, owner_check), (project, project_check)):
+            for snapshot, item in zip(row.get("evidence_snapshots", []), check["items"]):
+                if item.get("source_path") and item.get("type") in {"git_file", "file"}:
+                    path = Path(row.get("workspace_dir") or ".") / item["source_path"]
+                    files.append((item["state"], str(path.resolve()), snapshot))
+        if not files:
+            return None
+        files.sort(key=lambda file: file[0] != "needs_recheck")
+        paths = list(dict.fromkeys(path for _, path, _ in files))
+        snapshot = files[0][2]
+        # A path removed or renamed by a commit is still openable at its recorded revision.
+        source_at_commit = None
+        if snapshot.get("type") == "git_file" and snapshot.get("commit") and snapshot.get("path"):
+            source_at_commit = {k: snapshot[k] for k in ("commit", "path")}
+        return {
+            "entry_id": owner["id"], "kind": owner["kind"], "title": name,
+            "repo": repo, "branch": branch, "domain": compact_domain(owner),
+            "record_rev": owner.get("record_rev") or kb_evidence.canonical_entry_revision(owner),
+            "locator_evidence": states, "source_paths": paths[:3], "summary": "",
+            "applicability_state": "locate_only", "trust_tier": "recheck", "freshness_state": "needs_recheck",
+            "freshness_scope": "local_head", "confidence": 1.0, "retrieval_score": 1.0,
+            "why_matched": "Exact identifier in the requested repository and branch",
+            "warning": "仅用于定位。请打开来源，核对目标日期、分支与实施状态后再作判断。",
+            **({"source_at_commit": source_at_commit} if source_at_commit else {}),
+            **({"as_of": self.as_of.isoformat()} if self.as_of else {}),
+        }
 
     def _current_project(self, project_id: str) -> bool:
         project = self.projects.get(project_id)
@@ -254,5 +324,5 @@ def project_view(items: list[dict], context: dict) -> dict:
     return {"project_id": context["project_id"], "state": context["state"],
             "coverage": "bounded_retrieval", "groups": groups,
             "needs_review_ids": [item["entry_id"] for item in items
-                                 if item.get("applicability_state") in {"needs_review", "historical_or_out_of_scope"}],
+                                 if item.get("applicability_state") in {"needs_review", "historical_or_out_of_scope", "locate_only"}],
             "note": "Only returned, evidenced records are represented; this is not a complete project inventory."}

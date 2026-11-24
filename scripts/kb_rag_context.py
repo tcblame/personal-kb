@@ -1658,6 +1658,26 @@ def _recent_session_rank(item: dict[str, Any], *, index: int) -> float:
     return round(6.0 + raw_score * 0.55 + confidence * 2.4 - index * 0.05, 4)
 
 
+def _check_branch_applicability(item: dict, repo: str, branch: str, history: list[dict]) -> None:
+    if not repo or not branch or not item.get("branch") or item.get("applicability_state") == "locate_only":
+        return
+    if item.get("repo") != repo and not item.get("same_project"):
+        return
+    scope = item.get("domain", {}).get("scope", {})
+    replacements = [edge for edge in history if edge["relation"] == "supersedes"]
+    if (scope.get("branch") == branch and scope.get("repo_id", repo) == repo
+            or any(edge["applies_here"] and edge["scope"].get("branch") == branch for edge in replacements)):
+        return
+    other_replacement = bool(replacements) and all(
+        edge["scope"].get("branch") and not edge["applies_here"] for edge in replacements)
+    if item["branch"] == branch and not other_replacement and scope.get("branch", branch) == branch:
+        return
+    item["target_branch"] = branch
+    if item.get("applicability_state") in {"current", "historical_as_of", "unknown"}:
+        item["applicability_state"] = "historical_or_out_of_scope"
+    _append_warning(item, f"记录分支 {item['branch']}，查询分支 {branch}。请核验目标分支的适用依据。")
+
+
 def _is_personal_kb_runtime_entry(entry: dict[str, Any]) -> bool:
     combined = " ".join(
         _field_text(entry.get(field)).lower()
@@ -1908,6 +1928,7 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
     required_tags = kb_search._parse_tags(args.tags)
     reference_repo = None
     reference_branch = args.branch
+    checkout_scope = False
     candidates: dict[str, dict[str, Any]] = {}
     rejected_count = 0
     rejected_nonactionable_count = 0
@@ -1993,6 +2014,7 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
         if reference_repo is None and not args.global_search and ctx is not None:
             reference_repo = ctx.repo_name
             reference_branch = args.branch or ctx.branch
+            checkout_scope = getattr(ctx, "routing_source", "") == "current_repo"
         search_batches.append(
             {
                 "plan_index": plan_index,
@@ -2007,12 +2029,26 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
     project_context = None
     if not getattr(args, "no_domain", False):
         with span("retrieve.domain_init"):
+            routes = routing.get("candidates", [])
+            local_scope = checkout_scope if not routes else (
+                len(routes) == 1 and routes[0].get("repo") == reference_repo and (routes[0].get("locations") or checkout_scope))
             project_context = kb_project_view.ProjectContext(
                 args.query, repo=reference_repo or args.repo, branch=reference_branch,
                 environment=getattr(args, "environment", ""),
                 project_id=getattr(args, "project_id", ""), verify=verify_once, as_of=as_of,
                 graph=graph, clarify=not explicit_repo and routing.get("state") == "clarify",
+                allow_locator=not args.global_search and args.search_in in ("kb", "all")
+                and bool((explicit_repo and args.branch) or local_scope),
             )
+    locator = project_context.locator if project_context else None
+
+    def matches_filters(raw: dict) -> bool:
+        if (allowed_kinds and raw.get("kind") not in allowed_kinds) or not kb_search._matches_tags(raw, required_tags):
+            return False
+        if recent_cutoff:
+            timestamp = kb_search._ts_key(raw)
+            return bool(timestamp and datetime.fromtimestamp(timestamp) >= recent_cutoff)
+        return True
 
     def format_entry(raw: dict) -> dict:
         if project_context and project_context.same_project(raw):
@@ -2034,7 +2070,8 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
             entity_id = raw["domain"]["entity_id"]
             project_context.check_history(entity_id)
             if entity_id in project_context.history_links:
-                item["decision_history"] = project_context.history_links[entity_id][:4]
+                links = project_context.history_links[entity_id]
+                item["decision_history"] = sorted(links, key=lambda link: link["applies_here"], reverse=True)[:4]
             if as_of:
                 item["as_of"] = as_of.isoformat()
                 if project_context.eligible(raw):
@@ -2236,8 +2273,16 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
                 item["_score"] = round(score, 4)
                 candidates[entry_id] = item
 
-    for batch in search_batches:
-        collect_batch(batch)
+    if locator:
+        # This answer locates one object. Neither session briefs nor neighbours
+        # of the changed evidence supply verified claims about that object.
+        candidates.clear()
+        owner = project_context.entities[locator["domain"]["entity_id"]]
+        if matches_filters(owner):
+            candidates[locator["entry_id"]] = locator
+    else:
+        for batch in search_batches:
+            collect_batch(batch)
 
     raw_strong_ids: set[str] = set()
     for batch in search_batches:
@@ -2277,7 +2322,7 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
     }
 
     expansion_variants: list[dict[str, Any]] = []
-    if expand_requested and len(raw_strong_ids) < 2:
+    if expand_requested and not locator and len(raw_strong_ids) < 2:
         # At most four variants per planner query, each retaining at least one
         # original concrete anchor.  The original query itself was searched
         # above and is not repeated here.
@@ -2327,7 +2372,7 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
                     {"plan": plan.name, "query": variant}
                 )
 
-    if project_context:
+    if project_context and not locator:
         with span("retrieve.domain_related"):
             related = project_context.related(set(candidates), limit=min(32, max(0, search_limit)),
                                               include_noncurrent=args.include_noncurrent)
@@ -2344,14 +2389,8 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
             if not args.include_weak and not _subject_compatible(raw, args.query, subjects, subject_topics):
                 count("retrieve.rejected_subject")
                 continue
-            if allowed_kinds and raw.get("kind") not in allowed_kinds:
+            if not matches_filters(raw):
                 continue
-            if not kb_search._matches_tags(raw, required_tags):
-                continue
-            if recent_cutoff:
-                timestamp = kb_search._ts_key(raw)
-                if not timestamp or datetime.fromtimestamp(timestamp) < recent_cutoff:
-                    continue
             if prior_decision_query and not _is_decision_candidate(raw):
                 continue
             if non_kb_maintenance_query and _is_personal_kb_runtime_entry(raw):
@@ -2384,6 +2423,9 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
     ), reverse=True)
     for item in items:
         item.pop("_score", None)
+        entity_id = item.get("domain", {}).get("entity_id")
+        history = project_context.history_links.get(entity_id, []) if project_context else []
+        _check_branch_applicability(item, reference_repo or explicit_repo, reference_branch, history)
     items, freshness_filtered_count = _filter_freshness_items(
         items,
         include_noncurrent=args.include_noncurrent,
@@ -2474,7 +2516,7 @@ def _brief_result(payload: dict[str, Any]) -> dict[str, Any]:
         item = {key: hit[key] for key in (
             "entry_id", "kind", "title", "summary", "repo", "branch", "freshness_state",
             "freshness_scope", "trust_tier", "applicability_state", "warning", "domain", "superseded_in_scope_by",
-            "evidence_refs", "as_of", "related_via", "decision_history",
+            "evidence_refs", "as_of", "related_via", "decision_history", "record_rev", "locator_evidence", "source_at_commit", "target_branch",
         ) if hit.get(key)}
         sources = hit.get("source_paths") or hit.get("key_files") or []
         if sources:
@@ -2524,6 +2566,13 @@ def _print_markdown(payload: dict[str, Any]) -> None:
             f" trust={item.get('trust_tier', 'unknown')}\n"
         )
         sys.stdout.write(f"  why: {item.get('why_matched')}\n")
+        if item.get("applicability_state") == "locate_only":
+            sys.stdout.write(f"  locate_only {item['domain']['entity_id']} rev={item['record_rev']}\n")
+            if item.get("source_at_commit"):
+                recorded = item["source_at_commit"]
+                sys.stdout.write(f"  recorded source: {recorded['commit']}:{recorded['path']}\n")
+        if item.get("target_branch"):
+            sys.stdout.write(f"  applicability={item['applicability_state']} target_branch={item['target_branch']}\n")
         if item.get("summary"):
             sys.stdout.write(f"  note: {item.get('summary')}\n")
         sources = item.get("source_paths") or item.get("key_files") or []

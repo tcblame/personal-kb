@@ -92,7 +92,7 @@ python3 <skill-root>/scripts/kb.py closeout \
 
 Use only classified adoption in the normal path:
 
-- `--used-locate`: record without heat.
+- `--used-locate`: record without heat. A `locate_only` retrieval receipt supports this effect. Decision, fix, write and legacy adoption for the same ID require a separate verified retrieval with appropriate applicability.
 - `--used-decide`, `--used-fix`, `--used-write`: record and heat a fresh long-term record.
 - No adopted record: provide a concise skipped reason.
 
