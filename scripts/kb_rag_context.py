@@ -14,6 +14,7 @@ import tempfile
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from itertools import groupby
 from pathlib import Path
 from typing import Any
 
@@ -2609,6 +2610,39 @@ def _brief_result(payload: dict[str, Any]) -> dict[str, Any]:
     return brief
 
 
+def _compact_routing(brief: dict[str, Any]) -> dict[str, Any]:
+    """Keep ordered match evidence while sharing repeated source and workspace fields."""
+    route = brief.get("project_routing") or {}
+    candidates = route.get("candidates") or []
+    if (brief.get("error") or brief.get("receipt", {}).get("error")
+            or route.get("state") != "use" or len(candidates) != 1):
+        return brief
+    candidate = candidates[0]
+    checkout = candidate.get("verified_checkout") or {}
+    if not checkout.get("workspace_dir") or checkout.get("repo") != candidate.get("repo"):
+        return brief
+    selected = dict(candidate)
+    features = selected.get("features")
+    if features and "matched_terms_by_source" not in selected and all(
+        isinstance(feature, dict) and feature.keys() == {"term", "source"}
+        and isinstance(feature["source"], str) and isinstance(feature["term"], str)
+        for feature in features
+    ):
+        selected["matched_terms_by_source"] = [
+            {source: [feature["term"] for feature in matches]}
+            for source, matches in groupby(features, key=lambda feature: feature["source"])
+        ]
+        del selected["features"]
+    locations = selected.get("locations") or {}
+    if locations.get("cwd") == checkout["workspace_dir"]:
+        remaining = {key: value for key, value in locations.items() if key != "cwd"}
+        if remaining:
+            selected["locations"] = remaining
+        else:
+            del selected["locations"]
+    return {**brief, "project_routing": {**route, "candidates": [selected]}}
+
+
 def _print_markdown(payload: dict[str, Any]) -> None:
     retrieval_id = payload.get("retrieval_id", "")
     query = payload.get("query", "")
@@ -2738,6 +2772,7 @@ def main(argv: list[str]) -> int:
         help="Treat runtime/storage unavailability as an empty, non-retryable result",
     )
     parser.add_argument("--brief", action="store_true", help="Return decision fields and closeout identity as compact JSON")
+    parser.add_argument("--compact", action="store_true", help="Return brief JSON with verified project match terms grouped by source")
     parser.add_argument("--json", action="store_true", help="Output JSON instead of compact text")
     try:
         args = parser.parse_args(argv)
@@ -2748,13 +2783,14 @@ def main(argv: list[str]) -> int:
             message=str(exc), error_code="invalid_request",
         )
         options = argv[:argv.index("--")] if "--" in argv else argv
-        if "--json" in options or "--brief" in options:
+        if any(option in options for option in ("--json", "--brief", "--compact")):
             sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
         else:
             parser.print_usage(sys.stderr)
         sys.stderr.write(f"error: {exc}\n")
         return 2
 
+    args.brief = args.brief or args.compact
     return_code = 0
     try:
         task_query = args.query
@@ -2811,7 +2847,10 @@ def main(argv: list[str]) -> int:
         return_code = 5
 
     if args.brief:
-        sys.stdout.write(json.dumps(_brief_result(payload), ensure_ascii=False, separators=(",", ":")) + "\n")
+        brief = _brief_result(payload)
+        if args.compact:
+            brief = _compact_routing(brief)
+        sys.stdout.write(json.dumps(brief, ensure_ascii=False, separators=(",", ":")) + "\n")
     elif args.json:
         sys.stdout.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
     elif "error" not in payload:

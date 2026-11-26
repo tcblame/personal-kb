@@ -16,6 +16,49 @@ import kb
 
 
 class RoutePrecision(unittest.TestCase):
+    def test_optional_compact_output_preserves_routing_and_closeout(self):
+        import kb_rag_context
+
+        checkout = {"repo": "widget", "workspace_dir": "/workspace/widget", "branch": "main"}
+        locations = {"cwd": checkout["workspace_dir"], "current_file": "/workspace/widget/example.py"}
+        features = [{"term": "widget", "source": "aa"}, {"term": "example", "source": "bb"},
+                    {"term": "client", "source": "bb"}, {"term": "desktop", "source": "aa"}]
+        choice = {"repo": "widget", "verified_checkout": checkout, "needs_recheck": True,
+                  "locations": locations, "features": features}
+        route = {"state": "use", "candidates": [choice]}
+        payload = {"retrieval_id": "example-id", "query": "example", "project_routing": route,
+                   "hit_count": 1, "items": [{"entry_id": "aa", "warning": "review the other branch",
+                                               "target_branch": "release", "applicability_state": "locate_only"}]}
+        original = kb_rag_context._brief_result(payload)
+        path = self.root / "full.json"
+        out = io.StringIO()
+        with patch.object(kb_rag_context, "build_context", return_value=payload) as lookup:
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(kb.main(["retrieve", "example", "--compact", "--receipt-output", str(path)]), 0)
+        lookup.assert_called_once()
+        displayed = json.loads(out.getvalue())
+        self.assertEqual(displayed["items"], original["items"])
+        self.assertEqual(displayed["retrieval_id"], original["retrieval_id"])
+        compact = displayed["project_routing"]["candidates"][0]
+        expected = {**choice, "locations": {"current_file": locations["current_file"]},
+                    "matched_terms_by_source": [{"aa": ["widget"]}, {"bb": ["example", "client"]},
+                                                {"aa": ["desktop"]}]}
+        del expected["features"]
+        self.assertEqual(compact, expected)
+        self.assertEqual(json.loads(path.read_text())["project_routing"], route)
+        for safe_route in ({"state": "clarify", "question": "Which project?", "candidates": [choice]},
+                           {"state": "use", "candidates": [{**choice, "verified_checkout": {}}]},
+                           {"state": "use", "candidates": [choice, choice]}):
+            full = {**original, "project_routing": safe_route}
+            self.assertEqual(kb_rag_context._compact_routing(full), full)
+        for field in ({"error": {"code": "unavailable"}}, {"receipt": {"error": {"code": "failed"}}}):
+            full = {**original, **field}
+            self.assertEqual(kb_rag_context._compact_routing(full), full)
+        annotated = [{**features[0], "scope": "historic"}]
+        full = {**original, "project_routing": {**route, "candidates": [{**choice, "features": annotated}]}}
+        candidate = kb_rag_context._compact_routing(full)["project_routing"]["candidates"][0]
+        self.assertEqual(candidate["features"], annotated)
+
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory()
         self.root=Path(self.temp.name)

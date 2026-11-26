@@ -195,3 +195,7 @@ A unique current alias can locate an owner with changed evidence. The project ro
 ## 2026-11-24 session curation and conversation references
 
 An isolated replay exposed a user correction lost in a short excerpt and a conversation reference stored as a native session ID that a chat link could not resolve. Curation now gives answers first claim on the text budget and returns original line numbers. Retrieval preserves the chat URI through focused lookup and handles the session ID directly on the owning record. A link alone can locate the source. A substantive answer needs a separate topic match and current evidence. Session review and domain CLI regressions cover these paths, ambiguous wording, scope and historical cutoffs.
+
+## 2026-11-26 daily retrieval receipts
+
+For everyday use, typically one or two questions, answer accuracy and coverage of the evidence take priority over a small increase in the total tokens spent checking sources. Group adjacent project match terms by source when one checkout has been verified. Preserve their order, the source of every term, warnings and clarification questions. The daily entry uses `--compact`. Callers that consume per-term objects can keep using `--brief`.
