@@ -1,6 +1,6 @@
 ---
 name: personal-kb
-description: Proactively retrieve and maintain evidenced project knowledge, dated object history and work products. Invoke when there is any reasonable possibility (roughly 30% is enough) that cross-session history, recurring issues, user corrections, terminology, resource mappings, decisions, or similar work could materially help; also assess verified reusable memory candidates. Skip clearly one-off tasks with no likely historical or future value. Explicit KB audits use the read-only audit flow.
+description: Retrieve and maintain evidenced project history and work products. Answer single facts from the current conversation or a known authoritative source directly. Invoke when history could materially change an answer or operation (roughly 30%), for confirmed reusable updates, or for explicit read-only KB audits.
 ---
 
 # Personal KB
@@ -9,9 +9,9 @@ Use one local knowledge corpus as historical context. Hits are leads; current in
 
 ## Decide once per topic
 
-Retrieve when prior knowledge could reasonably help (roughly 30% is enough). Cross-session decisions, recurring symptoms, corrections, project or resource mappings, similar incidents and unfamiliar durable shorthand are useful signals. Do not require history keywords or proof that the task depends on history.
+Answer a single current fact from the conversation or a directly locatable authoritative file, configuration or status source. Open this skill for retrieval when cross-session decisions, changed names, conflicting evidence or previous experience could materially change the answer or the next action (roughly 30% is enough). Reuse the same instructions while they remain in context.
 
-Skip when a clearly one-off task is fully answered by current evidence and no useful historical connection is reasonably likely. An explicit runtime/effectiveness audit reads [audit.md](references/audit.md) and current session/runtime evidence directly; do not query the KB merely to prove that it was consulted. Remembering a newly established rule is maintenance; it does not itself require a RAG query.
+An explicit effectiveness audit reads [audit.md](references/audit.md) and current session/runtime evidence directly. Assess newly verified reusable knowledge separately. A direct lookup needs a closeout only if KB retrieval or maintenance actually took place.
 
 Split independently answerable subjects before retrieval. For the initial query, use the task's own terms for the object and the specific action, symptom or prior decision. In a long request, omit unrelated subtopics and execution instructions. For machine-specific state, include its identity and verify on that machine before adopting a configuration claim. Reuse the results within the topic. Retrieve again only for a new durable anchor, an explicitly broadened zero-hit search, contradictory current evidence, or lost results. Do not combine unrelated topics or repeat a query solely to change its exit code. One topic's retrieval does not satisfy another topic's budget.
 

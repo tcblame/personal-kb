@@ -303,6 +303,10 @@ def test_initialized_task_allows_maintenance_and_new_history_anchor() -> None:
     )
     assert current_durable["action"] == "maintain"
 
+    evidence = {"current_evidence_fully_answers_task": True}
+    assert preflight.predict_preflight("请记录刚核实的这个新规则，下次沿用。", evidence)["action"] == "maintain"
+    assert preflight.predict_preflight("请记录本次结果，下次是否沿用还待讨论。", evidence)["action"] == "skip"
+
 
 def test_hard_negative_and_english_history_boundaries() -> None:
     assert preflight.predict_preflight("给订单历史记录接口加分页，只看当前代码。")["action"] == "skip"

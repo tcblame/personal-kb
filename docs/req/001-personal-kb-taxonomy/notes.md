@@ -199,3 +199,9 @@ An isolated replay exposed a user correction lost in a short excerpt and a conve
 ## 2026-11-26 daily retrieval receipts
 
 For everyday use, typically one or two questions, answer accuracy and coverage of the evidence take priority over a small increase in the total tokens spent checking sources. Group adjacent project match terms by source when one checkout has been verified. Preserve their order, the source of every term, warnings and clarification questions. The daily entry uses `--compact`. Callers that consume per-term objects can keep using `--brief`.
+
+## 2026-11-27 · 已知出处的单点问题
+
+用户确认日常查询优先核对当前对话或可直接定位的现行出处。仅当历史可能影响结论或后续操作时启动检索；对历史决定、旧名与证据冲突继续主动取证。新知识的维护独立判断，实际检索或维护后统一收尾。触发条件写入 Skill 发现描述和正式入口，适用于正常模式。
+
+同日在 WSL 与 Windows 的 Codex 安装入口更新了 Skill 和路由评估。已有 54 个模拟用例及 7 个针对当前来源、历史与明确记忆请求的边界用例全部符合预期，公开安装包通过 9 项本地检查。实际 CLI 问答中，网关协议与独立进度都能直接依给定证据作答。审核规则同时涉及触发时序和放行门槛时，中档两次均未明确回答单次是否须审满五轮，最高档两次答清，共享提示词据此将此类复合判断留在高档。WSL 的 Cursor 已有链接指向同一份 Skill，Cursor 的独立路由配置沿用原值。
